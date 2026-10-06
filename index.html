@@ -45,7 +45,12 @@
         console.info("[OCTOBER] 안정 모드로 카메라 연결 중");
         try {
           const stream = await navigator.mediaDevices.getUserMedia({
-            video: true,
+            video: {
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              aspectRatio: { ideal: 16 / 9 },
+              facingMode: { ideal: "user" },
+            },
             audio: false,
           });
           if (window.__OCTOBER_CAMERA_CONNECTED) {
@@ -87,6 +92,6 @@
         console.error("[OCTOBER] 처리 오류", reason);
       });
     </script>
-    <script src="sketch.js?v=20261004-39"></script>
+    <script src="sketch.js?v=20261004-40"></script>
   </body>
 </html>

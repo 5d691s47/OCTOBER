@@ -34,6 +34,15 @@ const VISION_CALIBRATION_DURATION = 3000;
 // giving the vision pipeline more uninterrupted frames.
 const BACKGROUND_RENDER_INTERVAL = 1800;
 const CAMERA_CONNECTION_GRACE_PERIOD = 7000;
+const WIDE_CAMERA_CONSTRAINTS = {
+  video: {
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+    aspectRatio: { ideal: 16 / 9 },
+    facingMode: { ideal: "user" },
+  },
+  audio: false,
+};
 const VISION_PACKAGE =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/+esm";
 const VISION_WASM =
@@ -1009,13 +1018,20 @@ async function startVisionCamera() {
   );
 
   try {
-    // `video: true` deliberately avoids device-specific facing-mode and size
-    // constraints. Those optional constraints can leave some Windows camera
-    // drivers waiting forever even after Chrome has permission.
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: false,
-    });
+    let stream;
+    try {
+      // Prefer a 16:9 capture mode so the camera provides a wider horizontal
+      // view when the connected webcam supports it.
+      stream = await navigator.mediaDevices.getUserMedia(WIDE_CAMERA_CONSTRAINTS);
+    } catch (constraintError) {
+      // Some older Windows drivers reject ideal constraints even though the
+      // camera itself works. Keep the exhibition usable with a safe fallback.
+      console.warn("[OCTOBER] 와이드 카메라 설정을 지원하지 않아 기본 모드로 전환", constraintError);
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: false,
+      });
+    }
 
     if (visionCameraStarted || window.__OCTOBER_CAMERA_CONNECTED) {
       stream.getTracks().forEach((track) => track.stop());
