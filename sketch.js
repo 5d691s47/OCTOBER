@@ -18,7 +18,8 @@ const GLOBAL_PENCIL_OPACITY = 0.82;
 const FLOATING_DOT_COUNT = 360;
 // The display runs at 30fps; semantic segmentation only needs to produce a
 // new target often enough for motion to feel continuous.
-const VISION_SEGMENT_INTERVAL = 100;
+const VISION_SEGMENT_INTERVAL = 140;
+const VISION_MAX_ADAPTIVE_INTERVAL = 420;
 const VISION_CORE_BLUR = 1.5;
 const VISION_OUTER_BLUR = 2;
 const VISION_NEAREST_DISTANCE_BLUR = 1;
@@ -87,6 +88,8 @@ let visionTargetImageData;
 let visionCameraFrame;
 let visionCameraContext;
 let visionLastSegmentationAt = 0;
+let visionAdaptiveSegmentInterval = VISION_SEGMENT_INTERVAL;
+let visionGarmentSampleTick = 0;
 let visionLastFaceAt = 0;
 let visionLastVideoTime = -1;
 let visionClosestFace;
@@ -1099,7 +1102,7 @@ function updateVisionSegmentation() {
     : VISION_FACE_INTERVAL;
   if (
     !visionSegmenter ||
-    now - visionLastSegmentationAt < VISION_SEGMENT_INTERVAL ||
+    now - visionLastSegmentationAt < visionAdaptiveSegmentInterval ||
     visionCamera.currentTime === visionLastVideoTime
   ) {
     return;
@@ -1108,6 +1111,7 @@ function updateVisionSegmentation() {
   visionLastSegmentationAt = now;
   visionLastVideoTime = visionCamera.currentTime;
 
+  const processingStartedAt = performance.now();
   try {
     const result = visionSegmenter.segmentForVideo(visionCamera, now);
     const mask = result.categoryMask;
@@ -1138,6 +1142,15 @@ function updateVisionSegmentation() {
     console.error(error);
     visionRuntimeError = error?.message || error?.name || "unknown error";
     visionStatus = `인식 오류: ${visionRuntimeError}`;
+  } finally {
+    const processingTime = performance.now() - processingStartedAt;
+    // If a machine needs more time for one model pass, wait a little longer
+    // before starting the next one instead of stacking long main-thread jobs.
+    visionAdaptiveSegmentInterval = constrain(
+      Math.max(VISION_SEGMENT_INTERVAL, processingTime * 1.25),
+      VISION_SEGMENT_INTERVAL,
+      VISION_MAX_ADAPTIVE_INTERVAL,
+    );
   }
 }
 
@@ -1341,24 +1354,27 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
   // segmentation model exposes clothing as one category, so this lightweight
   // sampling step separates a differently colored top and bottom without
   // adding another heavy model.
-  for (const person of visionDetectedFaces) {
-    person._upperSample = { r: 0, g: 0, b: 0, count: 0 };
-    person._lowerSample = { r: 0, g: 0, b: 0, count: 0 };
-  }
-  for (let pixel = 0; pixel < labels.length; pixel++) {
-    if (labels[pixel] !== 4 && labels[pixel] !== 5) continue;
-    const person = findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight);
-    if (!person) continue;
-    const section = getVisionClothingSection(person, pixel, maskWidth, maskHeight);
-    const sample = section === "lower" ? person._lowerSample : person._upperSample;
-    const sourceIndex = pixel * 4;
-    sample.r += source[sourceIndex];
-    sample.g += source[sourceIndex + 1];
-    sample.b += source[sourceIndex + 2];
-    sample.count += 1;
-  }
-  for (const person of visionDetectedFaces) {
-    updateVisionGarmentColors(person);
+  visionGarmentSampleTick = (visionGarmentSampleTick + 1) % 3;
+  if (visionGarmentSampleTick === 0) {
+    for (const person of visionDetectedFaces) {
+      person._upperSample = { r: 0, g: 0, b: 0, count: 0 };
+      person._lowerSample = { r: 0, g: 0, b: 0, count: 0 };
+    }
+    for (let pixel = 0; pixel < labels.length; pixel++) {
+      if (labels[pixel] !== 4 && labels[pixel] !== 5) continue;
+      const person = findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight);
+      if (!person) continue;
+      const section = getVisionClothingSection(person, pixel, maskWidth, maskHeight);
+      const sample = section === "lower" ? person._lowerSample : person._upperSample;
+      const sourceIndex = pixel * 4;
+      sample.r += source[sourceIndex];
+      sample.g += source[sourceIndex + 1];
+      sample.b += source[sourceIndex + 2];
+      sample.count += 1;
+    }
+    for (const person of visionDetectedFaces) {
+      updateVisionGarmentColors(person);
+    }
   }
 
   for (let pixel = 0; pixel < labels.length; pixel++) {
@@ -1472,6 +1488,7 @@ function getVisionCoverDestination(sourceWidth, sourceHeight, targetWidth, targe
 
 function findVisionFaceForPixel(pixel, maskWidth, maskHeight) {
   if (!visionDetectedFaces.length || !visionCamera?.videoWidth) return null;
+  if (visionDetectedFaces.length === 1) return visionDetectedFaces[0];
 
   const x = pixel % maskWidth;
   const y = Math.floor(pixel / maskWidth);
@@ -1495,6 +1512,7 @@ function findVisionFaceForPixel(pixel, maskWidth, maskHeight) {
 
 function findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight) {
   if (!visionDetectedFaces.length || !visionCamera?.videoWidth) return null;
+  if (visionDetectedFaces.length === 1) return visionDetectedFaces[0];
 
   const x = pixel % maskWidth;
   let nearestFace = visionDetectedFaces[0];
