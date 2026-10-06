@@ -25,29 +25,11 @@
         position: relative;
       }
 
-      #vision-status {
-        position: fixed;
-        top: 18px;
-        left: 18px;
-        z-index: 20;
-        max-width: min(680px, calc(100vw - 36px));
-        padding: 10px 14px;
-        border: 1px solid rgba(255, 255, 255, 0.34);
-        border-radius: 12px;
-        background: rgba(17, 12, 24, 0.84);
-        color: #fff;
-        font:
-          600 13px/1.35 system-ui,
-          sans-serif;
-        box-shadow: 0 6px 28px rgba(0, 0, 0, 0.2);
-        pointer-events: none;
-      }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/p5@1.11.1/lib/p5.min.js"></script>
   </head>
   <body>
     <main id="canvas-container"></main>
-    <div id="vision-status" aria-live="polite">OCTOBER · 시작 준비 중</div>
     <script>
       // Lightweight camera fallback. It is deliberately independent from the
       // large p5/vision pipeline so the exhibition still shows visitors when
@@ -58,10 +40,9 @@
           window.__OCTOBER_CAMERA_FALLBACK_ACTIVE
         )
           return;
-        const panel = document.getElementById("vision-status");
         if (!navigator.mediaDevices?.getUserMedia) return;
         window.__OCTOBER_CAMERA_FALLBACK_ACTIVE = true;
-        if (panel) panel.textContent = "OCTOBER · 안정 모드로 카메라 연결 중";
+        console.info("[OCTOBER] 안정 모드로 카메라 연결 중");
         try {
           const stream = await navigator.mediaDevices.getUserMedia({
             video: true,
@@ -83,33 +64,29 @@
           video.style.cssText =
             "position:fixed;inset:0;width:100vw;height:100vh;object-fit:cover;opacity:0;z-index:1;pointer-events:none;";
           document.body.appendChild(video);
-          if (panel) panel.textContent = "OCTOBER · 안정 모드 · 카메라 연결됨";
+          console.info("[OCTOBER] 안정 모드 · 카메라 연결됨");
         } catch (error) {
           window.__OCTOBER_CAMERA_FALLBACK_ACTIVE = false;
-          if (panel)
-            panel.textContent = `OCTOBER · 카메라 연결 실패: ${error?.name || "알 수 없는 오류"}`;
+          console.error("[OCTOBER] 카메라 연결 실패", error);
         }
       }, 3000);
 
       window.addEventListener("error", (event) => {
-        const panel = document.getElementById("vision-status");
         // Ignore opaque errors from browser extensions or third-party scripts.
         // They arrive as the unhelpful generic message "Script error." and do
         // not indicate a failure in the exhibition code.
         const sameOrigin =
           event.filename &&
           new URL(event.filename, location.href).origin === location.origin;
-        if (panel && sameOrigin && event.message) {
-          panel.textContent = `OCTOBER · 스크립트 오류: ${event.message}`;
-        }
+        if (sameOrigin && event.message)
+          console.error("[OCTOBER] 스크립트 오류", event.message);
       });
       window.addEventListener("unhandledrejection", (event) => {
-        const panel = document.getElementById("vision-status");
         const reason =
           event.reason?.message || String(event.reason || "알 수 없는 오류");
-        if (panel) panel.textContent = `OCTOBER · 처리 오류: ${reason}`;
+        console.error("[OCTOBER] 처리 오류", reason);
       });
     </script>
-    <script src="sketch.js?v=20261004-20"></script>
+    <script src="sketch.js?v=20261004-38"></script>
   </body>
 </html>

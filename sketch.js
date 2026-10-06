@@ -10,19 +10,28 @@ const FINE_GRAIN_COUNT = 1100;
 const MICRO_DOT_COUNT = 1800;
 const PRINT_STROKE_COUNT = 1800;
 const PRINT_SPECK_COUNT = 2200;
+const PENCIL_HATCH_COUNT = 900;
+const GLOBAL_PENCIL_STROKE_COUNT = 2600;
+const GLOBAL_PENCIL_SPECK_COUNT = 2600;
+const GLOBAL_STIPPLE_COUNT = 7200;
+const GLOBAL_PENCIL_OPACITY = 0.82;
 const FLOATING_DOT_COUNT = 360;
 // The display runs at 30fps; semantic segmentation only needs to produce a
 // new target often enough for motion to feel continuous.
-const VISION_SEGMENT_INTERVAL = 120;
-const VISION_EDGE_BLUR = 2.2;
-const VISION_NOISE_OPACITY = 0.12;
+const VISION_SEGMENT_INTERVAL = 100;
+const VISION_CORE_BLUR = 1.5;
+const VISION_OUTER_BLUR = 2;
+const VISION_NEAREST_DISTANCE_BLUR = 1;
+const VISION_MID_DISTANCE_BLUR = 3;
+const VISION_FAR_DISTANCE_BLUR = 6;
+const VISION_PENCIL_OPACITY = 0.16;
 const VISION_FACE_INTERVAL = 500;
 const VISION_CALIBRATION_FACE_INTERVAL = 220;
 const VISION_CALIBRATION_DURATION = 3000;
 // Rebuilding the full-resolution print texture is much more expensive than
 // drawing the cached result, so leave the original atmosphere intact while
 // giving the vision pipeline more uninterrupted frames.
-const BACKGROUND_RENDER_INTERVAL = 1200;
+const BACKGROUND_RENDER_INTERVAL = 1800;
 const CAMERA_CONNECTION_GRACE_PERIOD = 7000;
 const VISION_PACKAGE =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/+esm";
@@ -52,11 +61,16 @@ let microDots = [];
 let floatingDots = [];
 let printStrokes = [];
 let printSpecks = [];
+let pencilHatches = [];
 let printTextureLayer;
+let globalIllustrationTexture;
+let globalStippleTexture;
+let globalIllustrationComposite;
 let sunMarks = [];
 let floorMarks = [];
 let visionCamera;
 let visionStatus = "인물 인식 모델을 준비하는 중";
+let lastLoggedVisionStatus = "";
 let visionReady = false;
 let visionCameraStarted = false;
 let visionCameraRequesting = false;
@@ -66,10 +80,10 @@ let visionSegmenter;
 let visionFaceDetector;
 let visionLayer;
 let visionLayerContext;
-let visionNoiseLayer;
-let visionNoiseContext;
+let visionPencilLayer;
+let visionPencilContext;
+let visionPersonLayers = new Map();
 let visionTargetImageData;
-let visionDisplayImageData;
 let visionCameraFrame;
 let visionCameraContext;
 let visionLastSegmentationAt = 0;
@@ -90,7 +104,6 @@ let visionCalibrationSamples = [];
 let visionCalibratedFaceArea = 0;
 let visionCalibrationReady = false;
 let visionRuntimeError = "";
-let visionModelFrameCount = 0;
 let cachedBackground;
 let lastBackgroundRender = -Infinity;
 let backgroundNeedsRefresh = true;
@@ -103,6 +116,10 @@ const STYLES = [
     floorBottom: [248, 184, 204],
     sun: [255, 226, 142],
     residue: [255, 255, 238],
+    clothes: [
+      [250, 91, 113], [255, 132, 94], [255, 183, 74], [239, 91, 151],
+      [245, 119, 177], [255, 151, 112], [220, 82, 111],
+    ],
   },
   {
     skyTop: [35, 78, 172],
@@ -111,6 +128,10 @@ const STYLES = [
     floorBottom: [166, 187, 239],
     sun: [255, 246, 209],
     residue: [255, 255, 255],
+    clothes: [
+      [44, 145, 224], [52, 190, 214], [91, 112, 226], [255, 205, 72],
+      [109, 213, 173], [235, 111, 177], [238, 132, 83],
+    ],
   },
   {
     skyTop: [139, 152, 220],
@@ -119,13 +140,16 @@ const STYLES = [
     floorBottom: [185, 167, 222],
     sun: [255, 231, 178],
     residue: [255, 244, 255],
+    clothes: [
+      [157, 111, 224], [211, 114, 205], [247, 117, 173], [255, 177, 111],
+      [130, 177, 226], [187, 139, 229], [113, 199, 173],
+    ],
   },
 ];
 
 function setup() {
   window.__OCTOBER_SKETCH_BOOTED = true;
-  const bootPanel = document.getElementById("vision-status");
-  if (bootPanel) bootPanel.textContent = "OCTOBER · 카메라 연결 시작";
+  console.info("[OCTOBER] 카메라 연결 시작");
   const canvas = createCanvas(windowWidth, windowHeight);
   canvas.parent("canvas-container");
   pixelDensity(1);
@@ -137,6 +161,7 @@ function setup() {
   // animated layers. The camera portrait is composited only after this.
   printTextureLayer = createGraphics(width, height);
   printTextureLayer.pixelDensity(1);
+  createGlobalIllustrationTexture();
   createWhiteResidues();
   createFineGrain();
   createMicroDots();
@@ -169,14 +194,128 @@ function draw() {
     visionCamera.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
     visionCamera.videoWidth > 0
   ) {
-    drawVisionCameraEcho();
     updateVisionSegmentation();
     drawVisionSegmentation();
     updateVisionCalibration();
     if (visionCalibrating) drawVisionCalibrationGuide();
   }
 
+  drawGlobalIllustrationTexture();
   drawVisionStatus();
+}
+
+function createGlobalIllustrationTexture() {
+  globalIllustrationTexture = createGraphics(width, height);
+  globalIllustrationTexture.pixelDensity(1);
+  globalIllustrationTexture.clear();
+  globalIllustrationTexture.strokeCap(ROUND);
+
+  // Very light overlapping strokes unify the background and the live figure
+  // as one colored-pencil illustration without hiding either one.
+  for (let i = 0; i < GLOBAL_PENCIL_STROKE_COUNT; i++) {
+    const angle = i % 3 === 0 ? 0.72 : -0.38;
+    const length = random(9, 38);
+    const x = random(-width * 0.05, width * 1.05);
+    const y = random(-height * 0.05, height * 1.05);
+    const shade = i % 4 === 0 ? [70, 58, 92] : [255, 245, 224];
+    globalIllustrationTexture.stroke(
+      shade[0],
+      shade[1],
+      shade[2],
+      random(18, 42),
+    );
+    globalIllustrationTexture.strokeWeight(random(0.55, 1.35));
+    globalIllustrationTexture.line(
+      x,
+      y,
+      x + cos(angle) * length,
+      y + sin(angle) * length,
+    );
+  }
+
+  for (let i = 0; i < GLOBAL_PENCIL_SPECK_COUNT; i++) {
+    const shade = i % 3 === 0 ? [45, 38, 70] : [255, 248, 230];
+    globalIllustrationTexture.noStroke();
+    globalIllustrationTexture.fill(shade[0], shade[1], shade[2], random(8, 24));
+    const size = random(0.45, 2.1);
+    globalIllustrationTexture.ellipse(random(width), random(height), size, size);
+  }
+
+  // The reference texture is primarily granular rather than line-based:
+  // thousands of tiny pigment deposits create the soft printed/stippled
+  // surface, especially where the background transitions between tones.
+  for (let i = 0; i < GLOBAL_STIPPLE_COUNT; i++) {
+    const x = random(width);
+    const y = random(height);
+    const density = 0.35 + noise(x * 0.0028, y * 0.0028) * 0.65;
+    if (random() > density) continue;
+    const dark = i % 5 !== 0;
+    const color = dark ? [36, 30, 62] : [255, 250, 230];
+    const alpha = dark ? random(10, 28) : random(8, 22);
+    globalIllustrationTexture.noStroke();
+    globalIllustrationTexture.fill(color[0], color[1], color[2], alpha);
+    const size = random(0.35, 1.35);
+    globalIllustrationTexture.ellipse(x, y, size, size * random(0.65, 1.4));
+  }
+
+  // A half-resolution regular dot field gives the dense printed/powdery
+  // material seen in the reference image, without creating a huge full-size
+  // particle simulation for every frame.
+  const stippleWidth = Math.max(320, Math.floor(width * 0.5));
+  const stippleHeight = Math.max(180, Math.floor(height * 0.5));
+  globalStippleTexture = createGraphics(stippleWidth, stippleHeight);
+  globalStippleTexture.pixelDensity(1);
+  globalStippleTexture.clear();
+  globalStippleTexture.noStroke();
+  const spacing = 2.8;
+  for (let y = 0; y < stippleHeight; y += spacing) {
+    for (let x = 0; x < stippleWidth; x += spacing) {
+      const localDensity =
+        0.58 + noise(x * 0.012, y * 0.012, 7) * 0.42;
+      if (random() > localDensity) continue;
+      const dark = (Math.floor(x / spacing) + Math.floor(y / spacing)) % 7 !== 0;
+      const dotColor = dark ? [32, 26, 55] : [255, 248, 224];
+      const dotAlpha = dark ? random(30, 72) : random(20, 54);
+      globalStippleTexture.fill(dotColor[0], dotColor[1], dotColor[2], dotAlpha);
+      const dotSize = random(0.65, 1.45);
+      globalStippleTexture.ellipse(
+        x + random(-0.35, 0.35),
+        y + random(-0.35, 0.35),
+        dotSize,
+        dotSize * random(0.72, 1.25),
+      );
+    }
+  }
+
+  // Compose the two static texture passes once. The live draw loop now makes
+  // one cached image draw instead of blending two full-screen layers every
+  // frame.
+  globalIllustrationComposite = createGraphics(width, height);
+  globalIllustrationComposite.pixelDensity(1);
+  globalIllustrationComposite.clear();
+  globalIllustrationComposite.push();
+  globalIllustrationComposite.blendMode(MULTIPLY);
+  globalIllustrationComposite.tint(255, 112 * GLOBAL_PENCIL_OPACITY);
+  globalIllustrationComposite.image(globalIllustrationTexture, 0, 0, width, height);
+  globalIllustrationComposite.blendMode(SCREEN);
+  globalIllustrationComposite.tint(255, 30 * GLOBAL_PENCIL_OPACITY);
+  globalIllustrationComposite.image(globalIllustrationTexture, 0, 0, width, height);
+  globalIllustrationComposite.blendMode(MULTIPLY);
+  globalIllustrationComposite.tint(255, 82 * GLOBAL_PENCIL_OPACITY);
+  globalIllustrationComposite.image(globalStippleTexture, 0, 0, width, height);
+  globalIllustrationComposite.blendMode(SCREEN);
+  globalIllustrationComposite.tint(255, 22 * GLOBAL_PENCIL_OPACITY);
+  globalIllustrationComposite.image(globalStippleTexture, 0, 0, width, height);
+  globalIllustrationComposite.pop();
+}
+
+function drawGlobalIllustrationTexture() {
+  if (!globalIllustrationComposite) return;
+  push();
+  image(globalIllustrationComposite, 0, 0, width, height);
+  tint(255, 255);
+  blendMode(BLEND);
+  pop();
 }
 
 // The original atmosphere contains thousands of particles and brush marks.
@@ -488,7 +627,7 @@ function drawPrintTextureLayer(style) {
       if (density < 0.18) continue;
 
       const point = animatedStrokePoint(stroke);
-      const alpha = stroke.alpha * density * 0.22;
+      const alpha = stroke.alpha * density * 0.3;
       context.strokeStyle = rgba(style.residue, alpha);
       context.lineWidth = stroke.width * 2.6;
       context.beginPath();
@@ -507,12 +646,28 @@ function drawPrintTextureLayer(style) {
       const point = animatedStrokePoint(stroke);
       const darkFiber = stroke.index % 7 === 0;
       const fiberColor = darkFiber ? style.skyTop : style.residue;
-      const alpha = stroke.alpha * density * (darkFiber ? 0.48 : 0.72);
+      const alpha = stroke.alpha * density * (darkFiber ? 0.62 : 0.88);
       context.strokeStyle = rgba(fiberColor, alpha);
       context.lineWidth = stroke.width;
       context.beginPath();
       context.moveTo(point.x1, point.y1);
       context.lineTo(point.x2, point.y2);
+      context.stroke();
+    }
+
+    // Layered colored-pencil hatching: translucent strokes in two directions
+    // create the pressure variation and rubbed pigment of a hand-drawn paper.
+    context.globalCompositeOperation = "multiply";
+    for (const hatch of pencilHatches) {
+      const density = textureDensity(hatch.x, hatch.y);
+      if (density < 0.14) continue;
+      const drift = animatedStrokePoint(hatch);
+      const alpha = hatch.alpha * density;
+      context.strokeStyle = rgba(hatch.cross ? style.skyTop : style.residue, alpha);
+      context.lineWidth = hatch.width;
+      context.beginPath();
+      context.moveTo(drift.x1, drift.y1);
+      context.lineTo(drift.x2, drift.y2);
       context.stroke();
     }
 
@@ -542,6 +697,7 @@ function drawPrintTextureLayer(style) {
 function createPrintTexture() {
   printStrokes = [];
   printSpecks = [];
+  pencilHatches = [];
 
   for (let i = 0; i < PRINT_STROKE_COUNT; i++) {
     const mainAngle = -0.34;
@@ -574,6 +730,27 @@ function createPrintTexture() {
       alpha: random(20, 110),
       motion: random(0.1, 1.5),
       speed: random(0.001, 0.012),
+      phase: random(TWO_PI),
+    });
+  }
+
+  for (let i = 0; i < PENCIL_HATCH_COUNT; i++) {
+    const cross = i % 2 === 0;
+    const angle = cross ? 0.72 : -0.38;
+    const length = random(10, 34);
+    pencilHatches.push({
+      index: i,
+      x: random(-width * 0.08, width * 1.08),
+      y: random(-height * 0.08, height * 1.08),
+      x1: cos(angle) * length * -0.5,
+      y1: sin(angle) * length * -0.5,
+      x2: cos(angle) * length * 0.5,
+      y2: sin(angle) * length * 0.5,
+      width: random(0.35, 1.05),
+      alpha: random(16, 42),
+      cross,
+      motion: random(0.12, 0.9),
+      speed: random(0.001, 0.006),
       phase: random(TWO_PI),
     });
   }
@@ -951,7 +1128,6 @@ function updateVisionSegmentation() {
     }
 
     renderVisionMask(mask.getAsUint8Array(), mask.width, mask.height);
-    visionModelFrameCount++;
     visionRuntimeError = "";
     if (!visionCalibrating) {
       visionStatus = visionPeopleCount
@@ -975,6 +1151,8 @@ function updateVisionClosestFace(now) {
       return {
         x: box.originX + box.width * 0.5,
         y: box.originY + box.height * 0.5,
+        width: box.width,
+        height: box.height,
         area: box.width * box.height,
       };
     })
@@ -999,7 +1177,11 @@ function updateVisionClosestFace(now) {
       trackId: match?.trackId ?? visionNextTrackId++,
       colorIndex: match
         ? match.colorIndex
-        : visionNextClothesColor++ % VISION_CLOTHES.length,
+        : visionNextClothesColor++ %
+          (STYLES[activeStyle].clothes?.length || VISION_CLOTHES.length),
+      upperSample: match?.upperSample || null,
+      lowerSample: match?.lowerSample || null,
+      lowerColorIndex: match?.lowerColorIndex ?? null,
     });
   }
 
@@ -1063,19 +1245,32 @@ function ensureVisionSurfaces(maskWidth, maskHeight) {
   });
   visionLayerContext.imageSmoothingEnabled = false;
 
-  visionNoiseLayer = document.createElement("canvas");
-  visionNoiseLayer.width = maskWidth;
-  visionNoiseLayer.height = maskHeight;
-  visionNoiseContext = visionNoiseLayer.getContext("2d");
-  const noise = visionNoiseContext.createImageData(maskWidth, maskHeight);
-  for (let pixel = 0; pixel < noise.data.length; pixel += 4) {
-    const value = Math.floor(Math.random() * 256);
-    noise.data[pixel] = value;
-    noise.data[pixel + 1] = value;
-    noise.data[pixel + 2] = value;
-    noise.data[pixel + 3] = 255;
+  // A sparse diagonal pencil hatch is clipped to the person later. Keeping
+  // this as a cached layer makes the texture inexpensive during live video.
+  visionPencilLayer = document.createElement("canvas");
+  visionPencilLayer.width = maskWidth;
+  visionPencilLayer.height = maskHeight;
+  visionPencilContext = visionPencilLayer.getContext("2d");
+  visionPencilContext.clearRect(0, 0, maskWidth, maskHeight);
+  visionPencilContext.lineCap = "round";
+  const pencilStrokeCount = Math.floor((maskWidth * maskHeight) / 1050);
+  for (let stroke = 0; stroke < pencilStrokeCount; stroke++) {
+    const x = Math.random() * maskWidth;
+    const y = Math.random() * maskHeight;
+    const length = 4 + Math.random() * 16;
+    const angle = -0.38 + (Math.random() - 0.5) * 0.18;
+    const alpha = 0.06 + Math.random() * 0.14;
+    const shade = Math.random() > 0.5 ? 18 : 255;
+    visionPencilContext.strokeStyle = `rgba(${shade}, ${shade}, ${shade}, ${alpha})`;
+    visionPencilContext.lineWidth = 0.35 + Math.random() * 0.8;
+    visionPencilContext.beginPath();
+    visionPencilContext.moveTo(x, y);
+    visionPencilContext.lineTo(
+      x + Math.cos(angle) * length,
+      y + Math.sin(angle) * length,
+    );
+    visionPencilContext.stroke();
   }
-  visionNoiseContext.putImageData(noise, 0, 0);
 
   visionCameraFrame = document.createElement("canvas");
   visionCameraFrame.width = maskWidth;
@@ -1085,31 +1280,86 @@ function ensureVisionSurfaces(maskWidth, maskHeight) {
   });
   visionBfsQueue = new Int32Array(maskWidth * maskHeight);
   visionTargetImageData = null;
-  visionDisplayImageData = null;
 }
 
 function renderVisionMask(labels, maskWidth, maskHeight) {
-  visionCameraContext.drawImage(visionCamera, 0, 0, maskWidth, maskHeight);
+  const cameraCrop = getVisionCoverCrop(
+    visionCamera.videoWidth,
+    visionCamera.videoHeight,
+    maskWidth,
+    maskHeight,
+  );
+  visionCameraContext.clearRect(0, 0, maskWidth, maskHeight);
+  visionCameraContext.drawImage(
+    visionCamera,
+    cameraCrop.x,
+    cameraCrop.y,
+    cameraCrop.width,
+    cameraCrop.height,
+    0,
+    0,
+    maskWidth,
+    maskHeight,
+  );
   const source = visionCameraContext.getImageData(
     0,
     0,
     maskWidth,
     maskHeight,
   ).data;
-  const { componentIds, components } = findVisionPeople(
-    labels,
-    maskWidth,
-    maskHeight,
-  );
-  const foregroundId = findVisionForeground(
-    componentIds,
-    components,
-    maskWidth,
-    maskHeight,
-  );
-  const people = trackVisionPeople(components, foregroundId);
-  visionPeopleCount = Math.max(people.size, visionDetectedFaces.length);
+  // Face detections already provide stable person anchors. When faces exist,
+  // skip the expensive full-mask connected-component flood fill and assign
+  // pixels directly to the nearest face. Keep the flood fill only as a
+  // fallback for bodies whose faces are not visible.
+  let componentIds;
+  let people = new Map();
+  if (!visionDetectedFaces.length) {
+    const componentsResult = findVisionPeople(labels, maskWidth, maskHeight);
+    componentIds = componentsResult.componentIds;
+    const foregroundId = findVisionForeground(
+      componentIds,
+      componentsResult.components,
+      maskWidth,
+      maskHeight,
+    );
+    people = trackVisionPeople(componentsResult.components, foregroundId);
+  }
+  visionPeopleCount = visionDetectedFaces.length || people.size;
   const output = visionLayerContext.createImageData(maskWidth, maskHeight);
+  const splitPersonLayers = visionDetectedFaces.length > 1;
+  const personOutputs = new Map();
+  if (splitPersonLayers) {
+    for (const person of visionDetectedFaces) {
+      personOutputs.set(person.trackId, {
+        person,
+        imageData: visionLayerContext.createImageData(maskWidth, maskHeight),
+      });
+    }
+  }
+
+  // Estimate the original garment colors above and below each face. The
+  // segmentation model exposes clothing as one category, so this lightweight
+  // sampling step separates a differently colored top and bottom without
+  // adding another heavy model.
+  for (const person of visionDetectedFaces) {
+    person._upperSample = { r: 0, g: 0, b: 0, count: 0 };
+    person._lowerSample = { r: 0, g: 0, b: 0, count: 0 };
+  }
+  for (let pixel = 0; pixel < labels.length; pixel++) {
+    if (labels[pixel] !== 4 && labels[pixel] !== 5) continue;
+    const person = findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight);
+    if (!person) continue;
+    const section = getVisionClothingSection(person, pixel, maskWidth, maskHeight);
+    const sample = section === "lower" ? person._lowerSample : person._upperSample;
+    const sourceIndex = pixel * 4;
+    sample.r += source[sourceIndex];
+    sample.g += source[sourceIndex + 1];
+    sample.b += source[sourceIndex + 2];
+    sample.count += 1;
+  }
+  for (const person of visionDetectedFaces) {
+    updateVisionGarmentColors(person);
+  }
 
   for (let pixel = 0; pixel < labels.length; pixel++) {
     const category = labels[pixel];
@@ -1119,13 +1369,18 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
       category === 4 || category === 5
         ? findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight)
         : findVisionFaceForPixel(pixel, maskWidth, maskHeight);
-    const person = facePerson || people.get(componentIds[pixel]);
+    const person = facePerson || (componentIds ? people.get(componentIds[pixel]) : null);
     const foreground = person?.foreground ?? false;
     const outputIndex = pixel * 4;
-    let color = visionColorForCategory(category, person?.colorIndex ?? 0);
+    const garmentColorIndex =
+      (category === 4 || category === 5) && person
+        ? getVisionGarmentColorIndex(person, pixel, maskWidth, maskHeight)
+        : person?.colorIndex ?? 0;
+    let color = visionColorForCategory(category, garmentColorIndex);
 
+    const edgePixel = isVisionToonEdge(pixel, labels, maskWidth, maskHeight);
     if (!foreground) {
-      color = isVisionToonEdge(pixel, labels, maskWidth, maskHeight)
+      color = edgePixel
         ? [20, 18, 27]
         : visionToonShade(
             color,
@@ -1138,35 +1393,97 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
     output.data[outputIndex] = color[0];
     output.data[outputIndex + 1] = color[1];
     output.data[outputIndex + 2] = color[2];
-    output.data[outputIndex + 3] = 255;
+    // Partially transparent boundary pixels let the enlarged mask blend into
+    // the background instead of exposing the hard 256px stair-step contour.
+    output.data[outputIndex + 3] = edgePixel ? 218 : 255;
+    if (splitPersonLayers && person?.trackId != null) {
+      const personOutput = personOutputs.get(person.trackId)?.imageData;
+      if (personOutput) {
+        personOutput.data[outputIndex] = color[0];
+        personOutput.data[outputIndex + 1] = color[1];
+        personOutput.data[outputIndex + 2] = color[2];
+        personOutput.data[outputIndex + 3] = edgePixel ? 218 : 255;
+      }
+    }
   }
 
   // Replace the displayed mask as one complete frame. Keeping only the
   // latest result prevents previous silhouettes from remaining as afterimages.
   visionTargetImageData = output;
-  visionDisplayImageData = output;
   visionLayerContext.putImageData(output, 0, 0);
-  // Clip the grain to the current person mask so the original background
-  // stays clean and only the colored figure receives the texture.
   visionLayerContext.save();
   visionLayerContext.globalCompositeOperation = "source-atop";
-  visionLayerContext.globalAlpha = VISION_NOISE_OPACITY;
-  visionLayerContext.drawImage(visionNoiseLayer, 0, 0);
+  visionLayerContext.globalAlpha = VISION_PENCIL_OPACITY;
+  visionLayerContext.drawImage(visionPencilLayer, 0, 0);
   visionLayerContext.restore();
+
+  // Keep a separate transparent layer for each detected person so distance
+  // based blur can be applied independently during compositing.
+  const activeTrackIds = new Set(personOutputs.keys());
+  for (const trackId of visionPersonLayers.keys()) {
+    if (!activeTrackIds.has(trackId)) visionPersonLayers.delete(trackId);
+  }
+  for (const [trackId, entry] of personOutputs) {
+    let layer = visionPersonLayers.get(trackId)?.canvas;
+    if (!layer || layer.width !== maskWidth || layer.height !== maskHeight) {
+      layer = document.createElement("canvas");
+      layer.width = maskWidth;
+      layer.height = maskHeight;
+    }
+    layer.getContext("2d").putImageData(entry.imageData, 0, 0);
+    visionPersonLayers.set(trackId, { canvas: layer, face: entry.person });
+  }
+}
+
+function getVisionCoverCrop(sourceWidth, sourceHeight, targetWidth, targetHeight) {
+  const sourceAspect = sourceWidth / sourceHeight;
+  const targetAspect = targetWidth / targetHeight;
+
+  if (sourceAspect > targetAspect) {
+    const width = sourceHeight * targetAspect;
+    return {
+      x: (sourceWidth - width) * 0.5,
+      y: 0,
+      width,
+      height: sourceHeight,
+    };
+  }
+
+  const height = sourceWidth / targetAspect;
+  return {
+    x: 0,
+    y: (sourceHeight - height) * 0.5,
+    width: sourceWidth,
+    height,
+  };
+}
+
+function getVisionCoverDestination(sourceWidth, sourceHeight, targetWidth, targetHeight) {
+  const scale = Math.max(targetWidth / sourceWidth, targetHeight / sourceHeight);
+  const width = sourceWidth * scale;
+  const height = sourceHeight * scale;
+  return {
+    x: (targetWidth - width) * 0.5,
+    y: (targetHeight - height) * 0.5,
+    width,
+    height,
+  };
 }
 
 function findVisionFaceForPixel(pixel, maskWidth, maskHeight) {
   if (!visionDetectedFaces.length || !visionCamera?.videoWidth) return null;
 
-  const x = (pixel % maskWidth) / maskWidth * visionCamera.videoWidth;
-  const y = Math.floor(pixel / maskWidth) / maskHeight * visionCamera.videoHeight;
+  const x = pixel % maskWidth;
+  const y = Math.floor(pixel / maskWidth);
   let nearestFace = visionDetectedFaces[0];
   let nearestDistance = Infinity;
 
   for (const face of visionDetectedFaces) {
     // Horizontal distance is weighted more strongly so adjoining torsos are
     // divided by the nearest face even when their clothing touches.
-    const distance = Math.abs(x - face.x) * 1.6 + Math.abs(y - face.y) * 0.15;
+    const facePoint = getVisionFaceMaskPoint(face, maskWidth, maskHeight);
+    const distance =
+      Math.abs(x - facePoint.x) * 1.6 + Math.abs(y - facePoint.y) * 0.15;
     if (distance < nearestDistance) {
       nearestFace = face;
       nearestDistance = distance;
@@ -1179,7 +1496,7 @@ function findVisionFaceForPixel(pixel, maskWidth, maskHeight) {
 function findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight) {
   if (!visionDetectedFaces.length || !visionCamera?.videoWidth) return null;
 
-  const x = (pixel % maskWidth) / maskWidth * visionCamera.videoWidth;
+  const x = pixel % maskWidth;
   let nearestFace = visionDetectedFaces[0];
   let nearestDistance = Infinity;
 
@@ -1187,7 +1504,8 @@ function findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight) {
   // horizontal face position as a stable divider so adjacent shirts keep
   // their own person's fixed color instead of blending together.
   for (const face of visionDetectedFaces) {
-    const distance = Math.abs(x - face.x);
+    const facePoint = getVisionFaceMaskPoint(face, maskWidth, maskHeight);
+    const distance = Math.abs(x - facePoint.x);
     if (distance < nearestDistance) {
       nearestFace = face;
       nearestDistance = distance;
@@ -1197,12 +1515,82 @@ function findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight) {
   return nearestFace;
 }
 
+function getVisionFaceMaskPoint(face, maskWidth, maskHeight) {
+  const crop = getVisionCoverCrop(
+    visionCamera.videoWidth,
+    visionCamera.videoHeight,
+    maskWidth,
+    maskHeight,
+  );
+  return {
+    x: ((face.x - crop.x) / crop.width) * maskWidth,
+    y: ((face.y - crop.y) / crop.height) * maskHeight,
+  };
+}
+
+function getVisionClothingSection(face, pixel, maskWidth, maskHeight) {
+  const facePoint = getVisionFaceMaskPoint(face, maskWidth, maskHeight);
+  const crop = getVisionCoverCrop(
+    visionCamera.videoWidth,
+    visionCamera.videoHeight,
+    maskWidth,
+    maskHeight,
+  );
+  const faceHeight = (face.height / crop.height) * maskHeight;
+  const y = Math.floor(pixel / maskWidth);
+  return y > facePoint.y + faceHeight * 1.55 ? "lower" : "upper";
+}
+
+function updateVisionGarmentColors(person) {
+  const upper = person._upperSample;
+  const lower = person._lowerSample;
+  if (!upper?.count || !lower?.count) return;
+
+  const upperAverage = [
+    upper.r / upper.count,
+    upper.g / upper.count,
+    upper.b / upper.count,
+  ];
+  const lowerAverage = [
+    lower.r / lower.count,
+    lower.g / lower.count,
+    lower.b / lower.count,
+  ];
+  const distance = Math.sqrt(
+    sq(upperAverage[0] - lowerAverage[0]) +
+      sq(upperAverage[1] - lowerAverage[1]) +
+      sq(upperAverage[2] - lowerAverage[2]),
+  );
+  const palette = STYLES[activeStyle].clothes || VISION_CLOTHES;
+  // Similar garments share one color. Clearly different garments use the
+  // next stable palette color and remain fixed for this tracked person.
+  if (distance > 48 && person.lowerColorIndex === null) {
+    person.lowerColorIndex = (person.colorIndex + 1) % palette.length;
+  } else if (distance <= 34) {
+    person.lowerColorIndex = person.colorIndex;
+  }
+  const track = visionFaceTracks.find((item) => item.trackId === person.trackId);
+  if (track) {
+    track.upperSample = upperAverage;
+    track.lowerSample = lowerAverage;
+    track.lowerColorIndex = person.lowerColorIndex;
+  }
+}
+
+function getVisionGarmentColorIndex(person, pixel, maskWidth, maskHeight) {
+  if (getVisionClothingSection(person, pixel, maskWidth, maskHeight) !== "lower") {
+    return person.colorIndex;
+  }
+  return person.lowerColorIndex ?? person.colorIndex;
+}
+
 function visionColorForCategory(category, colorIndex) {
   if (category === 1) return VISION_HAIR;
   if (category === 2 || category === 3) return VISION_SKIN;
   // Accessories share their nearest person's clothing color so that bags,
   // hats, and glasses stay in the same visual language as the garment.
-  return VISION_CLOTHES[colorIndex % VISION_CLOTHES.length];
+  const palette = STYLES[activeStyle].clothes || VISION_CLOTHES;
+  return palette[colorIndex % palette.length];
 }
 
 function visionToonShade(color, redValue, greenValue, blueValue) {
@@ -1358,30 +1746,6 @@ function trackVisionPeople(components, foregroundId) {
   return people;
 }
 
-function drawVisionCameraEcho() {
-  if (
-    !(visionCamera instanceof HTMLVideoElement) ||
-    visionCamera.readyState < HTMLMediaElement.HAVE_CURRENT_DATA
-  ) {
-    return;
-  }
-
-  // Use the browser canvas API here instead of p5.image(). p5 can reject a
-  // video element while its metadata is still settling, which used to stop
-  // the entire draw loop with "provided value is not ... HTMLVideoElement".
-  const context = drawingContext;
-  context.save();
-  // The raw feed is only a faint safety check. The visible portrait should
-  // come from the semantic mask below, not from a direct webcam image.
-  // Never expose the raw camera scene in the artwork. Only the semantic
-  // person mask below is allowed to appear over the original background.
-  context.globalAlpha = 0;
-  context.translate(width, 0);
-  context.scale(-1, 1);
-  context.drawImage(visionCamera, 0, 0, width, height);
-  context.restore();
-}
-
 function drawVisionSegmentation() {
   if (!(visionLayer instanceof HTMLCanvasElement) || !visionTargetImageData) return;
 
@@ -1392,11 +1756,84 @@ function drawVisionSegmentation() {
   context.translate(width, 0);
   context.scale(-1, 1);
   context.imageSmoothingEnabled = true;
-  context.globalAlpha = 1;
-  context.filter = `blur(${VISION_EDGE_BLUR}px)`;
-  context.drawImage(visionLayer, 0, 0, width, height);
+  context.imageSmoothingQuality = "high";
+  const destination = getVisionCoverDestination(
+    visionLayer.width,
+    visionLayer.height,
+    width,
+    height,
+  );
+  const personEntries = [...visionPersonLayers.values()];
+  if (personEntries.length) {
+    for (const entry of personEntries) {
+      const coreBlur = getVisionPersonBlur(entry.face, visionDetectedFaces);
+      const outerBlur = coreBlur <= VISION_CORE_BLUR
+        ? VISION_OUTER_BLUR
+        : coreBlur + 1;
+      drawVisionCanvasLayer(
+        context,
+        entry.canvas,
+        destination,
+        coreBlur,
+        outerBlur,
+      );
+    }
+  } else {
+    drawVisionCanvasLayer(
+      context,
+      visionLayer,
+      destination,
+      VISION_CORE_BLUR,
+      VISION_OUTER_BLUR,
+    );
+  }
   context.filter = "none";
   context.restore();
+}
+
+function drawVisionCanvasLayer(context, layer, destination, coreBlur, outerBlur) {
+  // A low-alpha soft under-print creates the requested 2px outer blend while
+  // the main pass keeps the person readable at its distance-based blur.
+  context.globalAlpha = 0.22;
+  context.filter = `blur(${outerBlur}px)`;
+  context.drawImage(
+    layer,
+    0,
+    0,
+    layer.width,
+    layer.height,
+    destination.x,
+    destination.y,
+    destination.width,
+    destination.height,
+  );
+  context.globalAlpha = 0.88;
+  context.filter = `blur(${coreBlur}px)`;
+  context.drawImage(
+    layer,
+    0,
+    0,
+    layer.width,
+    layer.height,
+    destination.x,
+    destination.y,
+    destination.width,
+    destination.height,
+  );
+}
+
+function getVisionPersonBlur(face, faces) {
+  if (!face || !faces.length) return VISION_CORE_BLUR;
+  const sorted = [...faces].sort((a, b) => b.area - a.area);
+  const largestArea = Math.max(sorted[0].area, 1);
+  const rank = sorted.findIndex((item) => item.trackId === face.trackId);
+  const relativeArea = face.area / largestArea;
+
+  // Face area is a practical monocular distance estimate: a smaller face in
+  // the same camera view is treated as farther away and receives more blur.
+  if (rank === 0) return VISION_NEAREST_DISTANCE_BLUR;
+  if (relativeArea >= 0.55) return VISION_MID_DISTANCE_BLUR;
+  return VISION_FAR_DISTANCE_BLUR;
 }
 
 function drawVisionCalibrationGuide() {
@@ -1433,16 +1870,11 @@ function drawVisionCalibrationGuide() {
 }
 
 function drawVisionStatus() {
-  const statusPanel = document.getElementById("vision-status");
-  if (statusPanel) {
-    if (window.__OCTOBER_FALLBACK_VIDEO) {
-      visionStatus = "안정 모드 · 카메라 연결됨";
-    }
-    const diagnostics =
-      visionCameraStarted && !visionPeopleCount
-        ? ` · 카메라 프레임 ${visionCamera.readyState} · 모델 처리 ${visionModelFrameCount}회`
-        : "";
-    statusPanel.textContent = `OCTOBER · ${visionStatus}${diagnostics}`;
+  if (window.__OCTOBER_FALLBACK_VIDEO) visionStatus = "안정 모드 · 카메라 연결됨";
+  const message = `[OCTOBER] ${visionStatus}`;
+  if (message !== lastLoggedVisionStatus) {
+    console.info(message);
+    lastLoggedVisionStatus = message;
   }
 }
 
@@ -1455,6 +1887,7 @@ function windowResized() {
   createPrintTexture();
   if (printTextureLayer)
     printTextureLayer.resizeCanvas(windowWidth, windowHeight);
+  createGlobalIllustrationTexture();
   createSunMarks();
   createFloorMarks();
   cachedBackground = null;
