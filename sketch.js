@@ -1921,6 +1921,7 @@ function drawVisionStatus() {
 
 function windowResized() {
   resizeCanvas(windowWidth, windowHeight);
+  updateVisionCameraOrientation();
   createWhiteResidues();
   createFineGrain();
   createMicroDots();
@@ -1933,4 +1934,18 @@ function windowResized() {
   createFloorMarks();
   cachedBackground = null;
   backgroundNeedsRefresh = true;
+}
+
+function updateVisionCameraOrientation() {
+  const track = visionCamera?.srcObject?.getVideoTracks?.()[0];
+  if (!track?.applyConstraints) return;
+
+  // The canvas and crop mapping already use the live window dimensions. This
+  // optional track update asks the camera for a matching orientation too,
+  // while keeping the existing stream if a driver rejects the request.
+  track
+    .applyConstraints(getDisplayCameraConstraints().video)
+    .catch((error) =>
+      console.warn("[OCTOBER] 화면 방향에 맞는 카메라 비율 적용 실패", error),
+    );
 }
