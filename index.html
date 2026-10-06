@@ -44,11 +44,12 @@
         window.__OCTOBER_CAMERA_FALLBACK_ACTIVE = true;
         console.info("[OCTOBER] 안정 모드로 카메라 연결 중");
         try {
+          const portraitDisplay = window.innerHeight > window.innerWidth;
           const stream = await navigator.mediaDevices.getUserMedia({
             video: {
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-              aspectRatio: { ideal: 16 / 9 },
+              width: { ideal: portraitDisplay ? 720 : 1280 },
+              height: { ideal: portraitDisplay ? 1280 : 720 },
+              aspectRatio: { ideal: portraitDisplay ? 9 / 16 : 16 / 9 },
               facingMode: { ideal: "user" },
             },
             audio: false,
@@ -92,6 +93,6 @@
         console.error("[OCTOBER] 처리 오류", reason);
       });
     </script>
-    <script src="sketch.js?v=20261004-40"></script>
+    <script src="sketch.js?v=20261004-41"></script>
   </body>
 </html>

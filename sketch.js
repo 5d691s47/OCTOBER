@@ -34,15 +34,6 @@ const VISION_CALIBRATION_DURATION = 3000;
 // giving the vision pipeline more uninterrupted frames.
 const BACKGROUND_RENDER_INTERVAL = 1800;
 const CAMERA_CONNECTION_GRACE_PERIOD = 7000;
-const WIDE_CAMERA_CONSTRAINTS = {
-  video: {
-    width: { ideal: 1280 },
-    height: { ideal: 720 },
-    aspectRatio: { ideal: 16 / 9 },
-    facingMode: { ideal: "user" },
-  },
-  audio: false,
-};
 const VISION_PACKAGE =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/+esm";
 const VISION_WASM =
@@ -1020,9 +1011,12 @@ async function startVisionCamera() {
   try {
     let stream;
     try {
-      // Prefer a 16:9 capture mode so the camera provides a wider horizontal
-      // view when the connected webcam supports it.
-      stream = await navigator.mediaDevices.getUserMedia(WIDE_CAMERA_CONSTRAINTS);
+      // Match the capture preference to the physical display orientation.
+      // Portrait installations request 9:16; landscape installations request
+      // 16:9. These are ideal constraints, so unsupported cameras still work.
+      stream = await navigator.mediaDevices.getUserMedia(
+        getDisplayCameraConstraints(),
+      );
     } catch (constraintError) {
       // Some older Windows drivers reject ideal constraints even though the
       // camera itself works. Keep the exhibition usable with a safe fallback.
@@ -1073,6 +1067,19 @@ async function startVisionCamera() {
         "카메라를 시작하지 못했습니다. Chrome 또는 Edge에서 다시 시도하세요.";
     }
   }
+}
+
+function getDisplayCameraConstraints() {
+  const portraitDisplay = window.innerHeight > window.innerWidth;
+  return {
+    video: {
+      width: { ideal: portraitDisplay ? 720 : 1280 },
+      height: { ideal: portraitDisplay ? 1280 : 720 },
+      aspectRatio: { ideal: portraitDisplay ? 9 / 16 : 16 / 9 },
+      facingMode: { ideal: "user" },
+    },
+    audio: false,
+  };
 }
 
 function beginVisionCalibrationWhenReady() {
