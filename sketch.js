@@ -30,8 +30,8 @@ const VISION_PERSON_CENTER_Y = 0.57;
 // new target often enough for motion to feel continuous.
 const VISION_SEGMENT_INTERVAL = 140;
 const VISION_MAX_ADAPTIVE_INTERVAL = 420;
-const VISION_CORE_BLUR = 3;
-const VISION_OUTER_BLUR = 5;
+const VISION_CORE_BLUR = 2;
+const VISION_OUTER_BLUR = 3;
 const VISION_NEAREST_DISTANCE_BLUR = 1;
 const VISION_MID_DISTANCE_BLUR = 3;
 const VISION_FAR_DISTANCE_BLUR = 6;
