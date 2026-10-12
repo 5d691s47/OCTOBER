@@ -1449,8 +1449,21 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
       maskWidth,
       maskHeight,
     );
+    // A face detector can return a box while the low-resolution segmentation
+    // mask has no component close enough to it. Do not hide every person in
+    // that case: immediately use the ordinary connected-component fallback.
+    if (!faceComponentOwners.size) {
+      const foregroundId = findVisionForeground(
+        componentIds,
+        componentsResult.components,
+        maskWidth,
+        maskHeight,
+      );
+      people = trackVisionPeople(componentsResult.components, foregroundId);
+    }
   }
   visionPeopleCount = visionDetectedFaces.length || people.size;
+  const hasFaceAnchoredComponents = faceComponentOwners.size > 0;
 
   // Use the camera's original colours only to decide whether this visitor's
   // top and bottom are actually different. Similar garments remain a single
@@ -1465,7 +1478,7 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
       const category = labels[pixel];
       if (category !== 4 && category !== 5) continue;
       const componentOwner = faceComponentOwners.get(componentIds[pixel]);
-      if (visionDetectedFaces.length && !componentOwner) continue;
+      if (hasFaceAnchoredComponents && !componentOwner) continue;
       const person = componentOwner
         ? findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight)
         : people.get(componentIds[pixel]);
@@ -1503,7 +1516,7 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
     // When faces are available, render only components that have passed the
     // face-proximity check. This drops isolated false positives such as wall
     // details or furniture before they can be mistaken for visitors.
-    if (visionDetectedFaces.length && !componentOwner) continue;
+    if (hasFaceAnchoredComponents && !componentOwner) continue;
     const facePerson = componentOwner
       ? category === 4 || category === 5
         ? findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight)
