@@ -20,7 +20,7 @@ const FLOATING_DOT_COUNT = 360;
 // different ratio, the artwork is letterboxed rather than stretched.
 const EXHIBITION_ASPECT_RATIO = 9 / 16;
 // Visitor framing, expressed relative to the 9:16 artwork stage.
-const VISION_PERSON_SCALE = 0.65;
+const VISION_PERSON_SCALE = 0.1;
 const VISION_PERSON_CENTER_X = 0.5;
 const VISION_PERSON_CENTER_Y = 0.57;
 // The display runs at 30fps; semantic segmentation only needs to produce a
