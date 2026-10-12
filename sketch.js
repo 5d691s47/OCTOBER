@@ -100,13 +100,11 @@ let visionPencilLayer;
 let visionPencilContext;
 let visionPersonLayers = new Map();
 let visionTargetImageData;
-let visionStableLabels;
-let visionCandidateLabels;
-let visionCandidateCounts;
 let visionCameraFrame;
 let visionCameraContext;
 let visionLastSegmentationAt = 0;
 let visionAdaptiveSegmentInterval = VISION_SEGMENT_INTERVAL;
+let visionGarmentSampleTick = 0;
 let visionLastFaceAt = 0;
 let visionLastVideoTime = -1;
 let visionClosestFace;
@@ -1293,9 +1291,8 @@ function updateVisionClosestFace(now) {
     visibleTracks.push(trackedFace);
   }
 
-  // Retain recently missing faces as matching candidates and as a short
-  // fallback anchor when every face is missed. Pixels still need a current
-  // segmentation component, so this does not leave a silhouette behind.
+  // Retain recently missing faces only as matching candidates. They are never
+  // rendered as people, so a visitor who leaves cannot remain as an afterimage.
   for (const previous of visionFaceTracks) {
     if (
       !matchedTracks.has(previous.trackId) &&
@@ -1306,13 +1303,12 @@ function updateVisionClosestFace(now) {
   }
 
   visionFaceTracks = nextTracks;
-  const renderFaces = visibleTracks.length ? visibleTracks : nextTracks;
-  const largestFace = renderFaces.reduce(
+  const largestFace = visibleTracks.reduce(
     (largest, face) => (!largest || face.area > largest.area ? face : largest),
     null,
   );
   visionClosestFace = largestFace;
-  visionDetectedFaces = renderFaces.map((face) => ({
+  visionDetectedFaces = visibleTracks.map((face) => ({
     ...face,
     foreground: face.trackId === largestFace?.trackId,
   }));
@@ -1401,13 +1397,9 @@ function ensureVisionSurfaces(maskWidth, maskHeight) {
   });
   visionBfsQueue = new Int32Array(maskWidth * maskHeight);
   visionTargetImageData = null;
-  visionStableLabels = null;
-  visionCandidateLabels = null;
-  visionCandidateCounts = null;
 }
 
 function renderVisionMask(labels, maskWidth, maskHeight) {
-  labels = stabiliseVisionLabels(labels);
   const cameraCrop = getVisionCoverCrop(
     visionCamera.videoWidth,
     visionCamera.videoHeight,
@@ -1459,7 +1451,37 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
     );
   }
   visionPeopleCount = visionDetectedFaces.length || people.size;
-  prepareVisionClothingZones(maskWidth, maskHeight);
+
+  // Use the camera's original colours only to decide whether this visitor's
+  // top and bottom are actually different. Similar garments remain a single
+  // stable colour instead of being forcibly divided by a horizontal line.
+  visionGarmentSampleTick = (visionGarmentSampleTick + 1) % 3;
+  if (visionGarmentSampleTick === 0) {
+    for (const person of visionDetectedFaces) {
+      person._upperSample = { r: 0, g: 0, b: 0, count: 0 };
+      person._lowerSample = { r: 0, g: 0, b: 0, count: 0 };
+    }
+    for (let pixel = 0; pixel < labels.length; pixel++) {
+      const category = labels[pixel];
+      if (category !== 4 && category !== 5) continue;
+      const componentOwner = faceComponentOwners.get(componentIds[pixel]);
+      if (visionDetectedFaces.length && !componentOwner) continue;
+      const person = componentOwner
+        ? findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight)
+        : people.get(componentIds[pixel]);
+      if (!person) continue;
+      const sample =
+        getVisionClothingSection(person, pixel, maskWidth, maskHeight) === "lower"
+          ? person._lowerSample
+          : person._upperSample;
+      const sourceIndex = pixel * 4;
+      sample.r += source[sourceIndex];
+      sample.g += source[sourceIndex + 1];
+      sample.b += source[sourceIndex + 2];
+      sample.count += 1;
+    }
+    for (const person of visionDetectedFaces) updateVisionGarmentColors(person);
+  }
   const output = visionLayerContext.createImageData(maskWidth, maskHeight);
   const splitPersonLayers = visionDetectedFaces.length > 1;
   const personOutputs = new Map();
@@ -1491,20 +1513,11 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
     if (!person) continue;
     const foreground = person?.foreground ?? false;
     const outputIndex = pixel * 4;
-    // The compact segmentation model occasionally calls dark hair “clothes”.
-    // A face-anchored head region wins over that unstable category so hair
-    // keeps its own colour instead of borrowing the shirt palette.
-    const displayCategory =
-      (category === 4 || category === 5) &&
-      person &&
-      isVisionHairRegion(person, pixel, maskWidth)
-        ? 1
-        : category;
     const garmentColorIndex =
-      (displayCategory === 4 || displayCategory === 5) && person
-        ? getVisionClothingColorIndex(person, pixel, maskWidth)
+      (category === 4 || category === 5) && person
+        ? getVisionGarmentColorIndex(person, pixel, maskWidth, maskHeight)
         : person?.colorIndex ?? 0;
-    let color = visionColorForCategory(displayCategory, garmentColorIndex);
+    let color = visionColorForCategory(category, garmentColorIndex);
 
     const edgePixel = isVisionToonEdge(pixel, labels, maskWidth, maskHeight);
     if (!foreground) {
@@ -1584,42 +1597,6 @@ function getVisionCoverCrop(sourceWidth, sourceHeight, targetWidth, targetHeight
     width: sourceWidth,
     height,
   };
-}
-
-function stabiliseVisionLabels(labels) {
-  if (
-    !visionStableLabels ||
-    visionStableLabels.length !== labels.length ||
-    !visionCandidateLabels ||
-    !visionCandidateCounts
-  ) {
-    visionStableLabels = new Uint8Array(labels);
-    visionCandidateLabels = new Uint8Array(labels);
-    visionCandidateCounts = new Uint8Array(labels.length);
-    return visionStableLabels;
-  }
-
-  // A changed class must appear in two consecutive segmentation passes before
-  // it replaces the displayed one. This removes the single-frame sparkling
-  // around shoulders and hair without blending different visitors together.
-  for (let pixel = 0; pixel < labels.length; pixel++) {
-    const nextLabel = labels[pixel];
-    if (nextLabel === visionStableLabels[pixel]) {
-      visionCandidateCounts[pixel] = 0;
-      continue;
-    }
-    if (nextLabel === visionCandidateLabels[pixel]) {
-      visionCandidateCounts[pixel]++;
-      if (visionCandidateCounts[pixel] >= 2) {
-        visionStableLabels[pixel] = nextLabel;
-        visionCandidateCounts[pixel] = 0;
-      }
-    } else {
-      visionCandidateLabels[pixel] = nextLabel;
-      visionCandidateCounts[pixel] = 1;
-    }
-  }
-  return visionStableLabels;
 }
 
 function getVisionCoverDestination(sourceWidth, sourceHeight, targetWidth, targetHeight) {
@@ -1712,72 +1689,55 @@ function getVisionFaceMaskPoint(face, maskWidth, maskHeight) {
 }
 
 function getNextVisionPersonColors(paletteLength) {
-  // Give each new visitor a two-color pair. The first three visitors receive
-  // non-overlapping pairs, so their tops and bottoms remain easy to tell
-  // apart while each pair stays fixed for the active filter.
-  const colorIndex = (visionNextClothesColor * 2) % paletteLength;
+  // A person starts with one garment colour. A second colour is introduced
+  // only after the source camera shows a clearly different top and bottom.
+  const colorIndex = visionNextClothesColor % paletteLength;
   visionNextClothesColor++;
   return {
     colorIndex,
-    lowerColorIndex: (colorIndex + 1) % paletteLength,
+    lowerColorIndex: null,
   };
 }
 
-function prepareVisionClothingZones(maskWidth, maskHeight) {
-  if (!visionCamera?.videoWidth || !visionCamera?.videoHeight) return;
+function getVisionClothingSection(person, pixel, maskWidth, maskHeight) {
+  if (!visionCamera?.videoWidth || !visionCamera?.videoHeight) return "upper";
   const crop = getVisionCoverCrop(
     visionCamera.videoWidth,
     visionCamera.videoHeight,
     maskWidth,
     maskHeight,
   );
-  for (const person of visionDetectedFaces) {
-    const facePoint = getVisionFaceMaskPoint(person, maskWidth, maskHeight);
-    const faceWidth = (person.width / crop.width) * maskWidth;
-    const faceHeight = (person.height / crop.height) * maskHeight;
-    person.faceMaskX = facePoint.x;
-    person.faceMaskY = facePoint.y;
-    person.faceMaskWidth = faceWidth;
-    person.faceMaskHeight = faceHeight;
-    // Approximate the waist from the face size: this is low enough to keep
-    // the torso in the top colour, then bends gently at the outer silhouette
-    // for a less mechanical upper/lower boundary.
-    person.clothingSplitY = facePoint.y + faceHeight * 2.65;
-    person.clothingCurveDepth = Math.max(faceHeight * 0.26, 3);
-  }
+  const facePoint = getVisionFaceMaskPoint(person, maskWidth, maskHeight);
+  const faceHeight = (person.height / crop.height) * maskHeight;
+  const y = Math.floor(pixel / maskWidth);
+  return y > facePoint.y + faceHeight * 1.55 ? "lower" : "upper";
 }
 
-function getVisionClothingColorIndex(person, pixel, maskWidth) {
-  const x = pixel % maskWidth;
-  const y = Math.floor(pixel / maskWidth);
-  const halfBodyWidth = Math.max((person.faceMaskWidth ?? 0) * 1.65, 16);
-  const horizontalDistance = constrain(
-    Math.abs(x - (person.faceMaskX ?? x)) / halfBodyWidth,
-    0,
-    1,
+function updateVisionGarmentColors(person) {
+  const upper = person._upperSample;
+  const lower = person._lowerSample;
+  if (!upper?.count || !lower?.count || person.lowerColorIndex != null) return;
+
+  const upperAverage = [upper.r / upper.count, upper.g / upper.count, upper.b / upper.count];
+  const lowerAverage = [lower.r / lower.count, lower.g / lower.count, lower.b / lower.count];
+  const difference = Math.sqrt(
+    sq(upperAverage[0] - lowerAverage[0]) +
+      sq(upperAverage[1] - lowerAverage[1]) +
+      sq(upperAverage[2] - lowerAverage[2]),
   );
-  const curvedSplitY =
-    (person.clothingSplitY ?? Infinity) +
-    (person.clothingCurveDepth ?? 0) * horizontalDistance * horizontalDistance;
-  if (y > curvedSplitY) {
-    return person.lowerColorIndex ?? person.colorIndex;
-  }
-  return person.colorIndex;
+  const palette = STYLES[activeStyle].clothes || VISION_CLOTHES;
+  // Only create a second garment colour when the live top/bottom samples are
+  // clearly different. This is the pre-today behaviour the artwork used.
+  person.lowerColorIndex =
+    difference > 48 ? (person.colorIndex + 1) % palette.length : person.colorIndex;
+  const track = visionFaceTracks.find((item) => item.trackId === person.trackId);
+  if (track) track.lowerColorIndex = person.lowerColorIndex;
 }
 
-function isVisionHairRegion(person, pixel, maskWidth) {
-  if (person.faceMaskX == null || person.faceMaskY == null) return false;
-  const x = pixel % maskWidth;
-  const y = Math.floor(pixel / maskWidth);
-  const horizontalRadius = Math.max(person.faceMaskWidth * 0.95, 10);
-  const verticalRadius = Math.max(person.faceMaskHeight * 1.05, 13);
-  const normalizedX = (x - person.faceMaskX) / horizontalRadius;
-  const normalizedY =
-    (y - (person.faceMaskY - person.faceMaskHeight * 0.22)) / verticalRadius;
-  return (
-    normalizedX * normalizedX + normalizedY * normalizedY <= 1 &&
-    y <= person.faceMaskY + person.faceMaskHeight * 0.58
-  );
+function getVisionGarmentColorIndex(person, pixel, maskWidth, maskHeight) {
+  return getVisionClothingSection(person, pixel, maskWidth, maskHeight) === "lower"
+    ? person.lowerColorIndex ?? person.colorIndex
+    : person.colorIndex;
 }
 
 function visionColorForCategory(category, colorIndex) {
