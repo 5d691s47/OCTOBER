@@ -20,7 +20,7 @@ const FLOATING_DOT_COUNT = 360;
 // different ratio, the artwork is letterboxed rather than stretched.
 const EXHIBITION_ASPECT_RATIO = 9 / 16;
 // Visitor framing, expressed relative to the 9:16 artwork stage.
-const VISION_PERSON_SCALE = 0.85;
+const VISION_PERSON_SCALE = 0.65;
 const VISION_PERSON_CENTER_X = 0.5;
 const VISION_PERSON_CENTER_Y = 0.57;
 // The display runs at 30fps; semantic segmentation only needs to produce a
@@ -96,7 +96,6 @@ let visionCameraFrame;
 let visionCameraContext;
 let visionLastSegmentationAt = 0;
 let visionAdaptiveSegmentInterval = VISION_SEGMENT_INTERVAL;
-let visionGarmentSampleTick = 0;
 let visionLastFaceAt = 0;
 let visionLastVideoTime = -1;
 let visionClosestFace;
@@ -1239,9 +1238,6 @@ function updateVisionClosestFace(now) {
         ? match.colorIndex
         : visionNextClothesColor++ %
           (STYLES[activeStyle].clothes?.length || VISION_CLOTHES.length),
-      upperSample: match?.upperSample || null,
-      lowerSample: match?.lowerSample || null,
-      lowerColorIndex: match?.lowerColorIndex ?? null,
     });
   }
 
@@ -1397,33 +1393,6 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
     }
   }
 
-  // Estimate the original garment colors above and below each face. The
-  // segmentation model exposes clothing as one category, so this lightweight
-  // sampling step separates a differently colored top and bottom without
-  // adding another heavy model.
-  visionGarmentSampleTick = (visionGarmentSampleTick + 1) % 3;
-  if (visionGarmentSampleTick === 0) {
-    for (const person of visionDetectedFaces) {
-      person._upperSample = { r: 0, g: 0, b: 0, count: 0 };
-      person._lowerSample = { r: 0, g: 0, b: 0, count: 0 };
-    }
-    for (let pixel = 0; pixel < labels.length; pixel++) {
-      if (labels[pixel] !== 4 && labels[pixel] !== 5) continue;
-      const person = findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight);
-      if (!person) continue;
-      const section = getVisionClothingSection(person, pixel, maskWidth, maskHeight);
-      const sample = section === "lower" ? person._lowerSample : person._upperSample;
-      const sourceIndex = pixel * 4;
-      sample.r += source[sourceIndex];
-      sample.g += source[sourceIndex + 1];
-      sample.b += source[sourceIndex + 2];
-      sample.count += 1;
-    }
-    for (const person of visionDetectedFaces) {
-      updateVisionGarmentColors(person);
-    }
-  }
-
   for (let pixel = 0; pixel < labels.length; pixel++) {
     const category = labels[pixel];
     if (category === 0) continue;
@@ -1435,10 +1404,10 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
     const person = facePerson || (componentIds ? people.get(componentIds[pixel]) : null);
     const foreground = person?.foreground ?? false;
     const outputIndex = pixel * 4;
-    const garmentColorIndex =
-      (category === 4 || category === 5) && person
-        ? getVisionGarmentColorIndex(person, pixel, maskWidth, maskHeight)
-        : person?.colorIndex ?? 0;
+    // A tracked visitor receives one clothing color for the current filter.
+    // Track IDs keep that color stable while separate visitors cycle through
+    // different palette entries.
+    const garmentColorIndex = person?.colorIndex ?? 0;
     let color = visionColorForCategory(category, garmentColorIndex);
 
     const edgePixel = isVisionToonEdge(pixel, labels, maskWidth, maskHeight);
@@ -1608,62 +1577,6 @@ function getVisionFaceMaskPoint(face, maskWidth, maskHeight) {
     x: ((face.x - crop.x) / crop.width) * maskWidth,
     y: ((face.y - crop.y) / crop.height) * maskHeight,
   };
-}
-
-function getVisionClothingSection(face, pixel, maskWidth, maskHeight) {
-  const facePoint = getVisionFaceMaskPoint(face, maskWidth, maskHeight);
-  const crop = getVisionCoverCrop(
-    visionCamera.videoWidth,
-    visionCamera.videoHeight,
-    maskWidth,
-    maskHeight,
-  );
-  const faceHeight = (face.height / crop.height) * maskHeight;
-  const y = Math.floor(pixel / maskWidth);
-  return y > facePoint.y + faceHeight * 1.55 ? "lower" : "upper";
-}
-
-function updateVisionGarmentColors(person) {
-  const upper = person._upperSample;
-  const lower = person._lowerSample;
-  if (!upper?.count || !lower?.count) return;
-
-  const upperAverage = [
-    upper.r / upper.count,
-    upper.g / upper.count,
-    upper.b / upper.count,
-  ];
-  const lowerAverage = [
-    lower.r / lower.count,
-    lower.g / lower.count,
-    lower.b / lower.count,
-  ];
-  const distance = Math.sqrt(
-    sq(upperAverage[0] - lowerAverage[0]) +
-      sq(upperAverage[1] - lowerAverage[1]) +
-      sq(upperAverage[2] - lowerAverage[2]),
-  );
-  const palette = STYLES[activeStyle].clothes || VISION_CLOTHES;
-  // Similar garments share one color. Clearly different garments use the
-  // next stable palette color and remain fixed for this tracked person.
-  if (distance > 48 && person.lowerColorIndex === null) {
-    person.lowerColorIndex = (person.colorIndex + 1) % palette.length;
-  } else if (distance <= 34) {
-    person.lowerColorIndex = person.colorIndex;
-  }
-  const track = visionFaceTracks.find((item) => item.trackId === person.trackId);
-  if (track) {
-    track.upperSample = upperAverage;
-    track.lowerSample = lowerAverage;
-    track.lowerColorIndex = person.lowerColorIndex;
-  }
-}
-
-function getVisionGarmentColorIndex(person, pixel, maskWidth, maskHeight) {
-  if (getVisionClothingSection(person, pixel, maskWidth, maskHeight) !== "lower") {
-    return person.colorIndex;
-  }
-  return person.lowerColorIndex ?? person.colorIndex;
 }
 
 function visionColorForCategory(category, colorIndex) {
