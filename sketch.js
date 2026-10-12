@@ -37,6 +37,11 @@ const VISION_PENCIL_OPACITY = 0.16;
 const VISION_FACE_INTERVAL = 500;
 const VISION_CALIBRATION_FACE_INTERVAL = 220;
 const VISION_CALIBRATION_DURATION = 3000;
+// Keep an identity alive briefly when a face detector skips a frame. Without
+// this grace period, the same visitor could be treated as a new person and
+// receive a different garment palette within one filter.
+const VISION_FACE_TRACK_MEMORY = 1800;
+const VISION_FACE_TRACK_MATCH_DISTANCE = 180;
 // Rebuilding the full-resolution print texture is much more expensive than
 // drawing the cached result, so leave the original atmosphere intact while
 // giving the vision pipeline more uninterrupted frames.
@@ -1246,6 +1251,7 @@ function updateVisionClosestFace(now) {
     .filter(Boolean);
 
   const nextTracks = [];
+  const visibleTracks = [];
   const matchedTracks = new Set();
   for (const face of detected) {
     let match;
@@ -1253,7 +1259,10 @@ function updateVisionClosestFace(now) {
     for (const previous of visionFaceTracks) {
       if (matchedTracks.has(previous.trackId)) continue;
       const distance = sq(face.x - previous.x) + sq(face.y - previous.y);
-      if (distance < nearestDistance && distance < 110 * 110) {
+      if (
+        distance < nearestDistance &&
+        distance < VISION_FACE_TRACK_MATCH_DISTANCE ** 2
+      ) {
         match = previous;
         nearestDistance = distance;
       }
@@ -1264,25 +1273,41 @@ function updateVisionClosestFace(now) {
       : getNextVisionPersonColors(
           STYLES[activeStyle].clothes?.length || VISION_CLOTHES.length,
         );
-    nextTracks.push({
+    const trackedFace = {
       ...face,
       trackId: match?.trackId ?? visionNextTrackId++,
       colorIndex: assignedColors.colorIndex,
       lowerColorIndex: assignedColors.lowerColorIndex,
-    });
+      lastSeenAt: now,
+    };
+    nextTracks.push(trackedFace);
+    visibleTracks.push(trackedFace);
+  }
+
+  // Retain recently missing faces as matching candidates and as a short
+  // fallback anchor when every face is missed. Pixels still need a current
+  // segmentation component, so this does not leave a silhouette behind.
+  for (const previous of visionFaceTracks) {
+    if (
+      !matchedTracks.has(previous.trackId) &&
+      now - (previous.lastSeenAt ?? now) < VISION_FACE_TRACK_MEMORY
+    ) {
+      nextTracks.push(previous);
+    }
   }
 
   visionFaceTracks = nextTracks;
-  const largestFace = nextTracks.reduce(
+  const renderFaces = visibleTracks.length ? visibleTracks : nextTracks;
+  const largestFace = renderFaces.reduce(
     (largest, face) => (!largest || face.area > largest.area ? face : largest),
     null,
   );
   visionClosestFace = largestFace;
-  visionDetectedFaces = nextTracks.map((face) => ({
+  visionDetectedFaces = renderFaces.map((face) => ({
     ...face,
     foreground: face.trackId === largestFace?.trackId,
   }));
-  visionFaceCount = faces.length;
+  visionFaceCount = visibleTracks.length;
   if (visionCalibrating && largestFace) {
     visionCalibrationSamples.push(largestFace.area);
   }
