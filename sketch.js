@@ -30,8 +30,8 @@ const VISION_PERSON_CENTER_Y = 0.57;
 // new target often enough for motion to feel continuous.
 const VISION_SEGMENT_INTERVAL = 140;
 const VISION_MAX_ADAPTIVE_INTERVAL = 420;
-const VISION_CORE_BLUR = 2;
-const VISION_OUTER_BLUR = 3;
+const VISION_CORE_BLUR = 3;
+const VISION_OUTER_BLUR = 5;
 const VISION_NEAREST_DISTANCE_BLUR = 1;
 const VISION_MID_DISTANCE_BLUR = 3;
 const VISION_FAR_DISTANCE_BLUR = 6;
@@ -100,6 +100,9 @@ let visionPencilLayer;
 let visionPencilContext;
 let visionPersonLayers = new Map();
 let visionTargetImageData;
+let visionStableLabels;
+let visionCandidateLabels;
+let visionCandidateCounts;
 let visionCameraFrame;
 let visionCameraContext;
 let visionLastSegmentationAt = 0;
@@ -1398,9 +1401,13 @@ function ensureVisionSurfaces(maskWidth, maskHeight) {
   });
   visionBfsQueue = new Int32Array(maskWidth * maskHeight);
   visionTargetImageData = null;
+  visionStableLabels = null;
+  visionCandidateLabels = null;
+  visionCandidateCounts = null;
 }
 
 function renderVisionMask(labels, maskWidth, maskHeight) {
+  labels = stabiliseVisionLabels(labels);
   const cameraCrop = getVisionCoverCrop(
     visionCamera.videoWidth,
     visionCamera.videoHeight,
@@ -1484,11 +1491,20 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
     if (!person) continue;
     const foreground = person?.foreground ?? false;
     const outputIndex = pixel * 4;
+    // The compact segmentation model occasionally calls dark hair “clothes”.
+    // A face-anchored head region wins over that unstable category so hair
+    // keeps its own colour instead of borrowing the shirt palette.
+    const displayCategory =
+      (category === 4 || category === 5) &&
+      person &&
+      isVisionHairRegion(person, pixel, maskWidth)
+        ? 1
+        : category;
     const garmentColorIndex =
-      (category === 4 || category === 5) && person
+      (displayCategory === 4 || displayCategory === 5) && person
         ? getVisionClothingColorIndex(person, pixel, maskWidth)
         : person?.colorIndex ?? 0;
-    let color = visionColorForCategory(category, garmentColorIndex);
+    let color = visionColorForCategory(displayCategory, garmentColorIndex);
 
     const edgePixel = isVisionToonEdge(pixel, labels, maskWidth, maskHeight);
     if (!foreground) {
@@ -1568,6 +1584,42 @@ function getVisionCoverCrop(sourceWidth, sourceHeight, targetWidth, targetHeight
     width: sourceWidth,
     height,
   };
+}
+
+function stabiliseVisionLabels(labels) {
+  if (
+    !visionStableLabels ||
+    visionStableLabels.length !== labels.length ||
+    !visionCandidateLabels ||
+    !visionCandidateCounts
+  ) {
+    visionStableLabels = new Uint8Array(labels);
+    visionCandidateLabels = new Uint8Array(labels);
+    visionCandidateCounts = new Uint8Array(labels.length);
+    return visionStableLabels;
+  }
+
+  // A changed class must appear in two consecutive segmentation passes before
+  // it replaces the displayed one. This removes the single-frame sparkling
+  // around shoulders and hair without blending different visitors together.
+  for (let pixel = 0; pixel < labels.length; pixel++) {
+    const nextLabel = labels[pixel];
+    if (nextLabel === visionStableLabels[pixel]) {
+      visionCandidateCounts[pixel] = 0;
+      continue;
+    }
+    if (nextLabel === visionCandidateLabels[pixel]) {
+      visionCandidateCounts[pixel]++;
+      if (visionCandidateCounts[pixel] >= 2) {
+        visionStableLabels[pixel] = nextLabel;
+        visionCandidateCounts[pixel] = 0;
+      }
+    } else {
+      visionCandidateLabels[pixel] = nextLabel;
+      visionCandidateCounts[pixel] = 1;
+    }
+  }
+  return visionStableLabels;
 }
 
 function getVisionCoverDestination(sourceWidth, sourceHeight, targetWidth, targetHeight) {
@@ -1681,19 +1733,51 @@ function prepareVisionClothingZones(maskWidth, maskHeight) {
   );
   for (const person of visionDetectedFaces) {
     const facePoint = getVisionFaceMaskPoint(person, maskWidth, maskHeight);
+    const faceWidth = (person.width / crop.width) * maskWidth;
     const faceHeight = (person.height / crop.height) * maskHeight;
-    // A gently rounded torso split, placed below the face rather than across
-    // the neck, keeps the upper/lower garment transition visually natural.
-    person.clothingSplitY = facePoint.y + faceHeight * 1.55;
+    person.faceMaskX = facePoint.x;
+    person.faceMaskY = facePoint.y;
+    person.faceMaskWidth = faceWidth;
+    person.faceMaskHeight = faceHeight;
+    // Approximate the waist from the face size: this is low enough to keep
+    // the torso in the top colour, then bends gently at the outer silhouette
+    // for a less mechanical upper/lower boundary.
+    person.clothingSplitY = facePoint.y + faceHeight * 2.65;
+    person.clothingCurveDepth = Math.max(faceHeight * 0.26, 3);
   }
 }
 
 function getVisionClothingColorIndex(person, pixel, maskWidth) {
+  const x = pixel % maskWidth;
   const y = Math.floor(pixel / maskWidth);
-  if (person.clothingSplitY != null && y > person.clothingSplitY) {
+  const halfBodyWidth = Math.max((person.faceMaskWidth ?? 0) * 1.65, 16);
+  const horizontalDistance = constrain(
+    Math.abs(x - (person.faceMaskX ?? x)) / halfBodyWidth,
+    0,
+    1,
+  );
+  const curvedSplitY =
+    (person.clothingSplitY ?? Infinity) +
+    (person.clothingCurveDepth ?? 0) * horizontalDistance * horizontalDistance;
+  if (y > curvedSplitY) {
     return person.lowerColorIndex ?? person.colorIndex;
   }
   return person.colorIndex;
+}
+
+function isVisionHairRegion(person, pixel, maskWidth) {
+  if (person.faceMaskX == null || person.faceMaskY == null) return false;
+  const x = pixel % maskWidth;
+  const y = Math.floor(pixel / maskWidth);
+  const horizontalRadius = Math.max(person.faceMaskWidth * 0.95, 10);
+  const verticalRadius = Math.max(person.faceMaskHeight * 1.05, 13);
+  const normalizedX = (x - person.faceMaskX) / horizontalRadius;
+  const normalizedY =
+    (y - (person.faceMaskY - person.faceMaskHeight * 0.22)) / verticalRadius;
+  return (
+    normalizedX * normalizedX + normalizedY * normalizedY <= 1 &&
+    y <= person.faceMaskY + person.faceMaskHeight * 0.58
+  );
 }
 
 function visionColorForCategory(category, colorIndex) {
