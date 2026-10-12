@@ -16,6 +16,13 @@ const GLOBAL_PENCIL_SPECK_COUNT = 2600;
 const GLOBAL_STIPPLE_COUNT = 7200;
 const GLOBAL_PENCIL_OPACITY = 0.82;
 const FLOATING_DOT_COUNT = 360;
+// The exhibition is authored for a vertical 9:16 display. On a screen with a
+// different ratio, the artwork is letterboxed rather than stretched.
+const EXHIBITION_ASPECT_RATIO = 9 / 16;
+// Visitor framing, expressed relative to the 9:16 artwork stage.
+const VISION_PERSON_SCALE = 0.85;
+const VISION_PERSON_CENTER_X = 0.5;
+const VISION_PERSON_CENTER_Y = 0.57;
 // The display runs at 30fps; semantic segmentation only needs to produce a
 // new target often enough for motion to feel continuous.
 const VISION_SEGMENT_INTERVAL = 140;
@@ -32,7 +39,7 @@ const VISION_CALIBRATION_DURATION = 3000;
 // Rebuilding the full-resolution print texture is much more expensive than
 // drawing the cached result, so leave the original atmosphere intact while
 // giving the vision pipeline more uninterrupted frames.
-const BACKGROUND_RENDER_INTERVAL = 1800;
+const BACKGROUND_RENDER_INTERVAL = 6000;
 const CAMERA_CONNECTION_GRACE_PERIOD = 7000;
 const VISION_PACKAGE =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/+esm";
@@ -153,12 +160,20 @@ const STYLES = [
 function setup() {
   window.__OCTOBER_SKETCH_BOOTED = true;
   console.info("[OCTOBER] 카메라 연결 시작");
-  const canvas = createCanvas(windowWidth, windowHeight);
+  const exhibitionSize = getExhibitionCanvasSize();
+  const canvas = createCanvas(exhibitionSize.width, exhibitionSize.height);
   canvas.parent("canvas-container");
   pixelDensity(1);
   noSmooth();
   frameRate(30);
   noStroke();
+
+  // Start the browser camera handshake before building the dense static
+  // textures below. Those textures are intentionally rich and can take a
+  // moment on a gallery PC; the camera and model downloads can proceed while
+  // they are being prepared.
+  startVisionCamera();
+  initialiseVision();
 
   // Preserve the original OCTOBER atmosphere exactly as its own set of
   // animated layers. The camera portrait is composited only after this.
@@ -174,11 +189,20 @@ function setup() {
   createFloorMarks();
 
   lastStyleChange = millis();
-  // Ask for the camera before loading the ML models. On lower-powered
-  // exhibition PCs this keeps the browser's camera handshake out of the
-  // model-loading bottleneck.
-  startVisionCamera();
-  initialiseVision();
+}
+
+function getExhibitionCanvasSize() {
+  const viewportAspect = windowWidth / windowHeight;
+  if (viewportAspect > EXHIBITION_ASPECT_RATIO) {
+    return {
+      width: Math.round(windowHeight * EXHIBITION_ASPECT_RATIO),
+      height: windowHeight,
+    };
+  }
+  return {
+    width: windowWidth,
+    height: Math.round(windowWidth / EXHIBITION_ASPECT_RATIO),
+  };
 }
 
 function draw() {
@@ -1509,6 +1533,23 @@ function getVisionCoverDestination(sourceWidth, sourceHeight, targetWidth, targe
   };
 }
 
+function getVisionPersonDestination(sourceWidth, sourceHeight) {
+  const cover = getVisionCoverDestination(
+    sourceWidth,
+    sourceHeight,
+    width,
+    height,
+  );
+  const scaledWidth = cover.width * VISION_PERSON_SCALE;
+  const scaledHeight = cover.height * VISION_PERSON_SCALE;
+  return {
+    x: width * VISION_PERSON_CENTER_X - scaledWidth * 0.5,
+    y: height * VISION_PERSON_CENTER_Y - scaledHeight * 0.5,
+    width: scaledWidth,
+    height: scaledHeight,
+  };
+}
+
 function findVisionFaceForPixel(pixel, maskWidth, maskHeight) {
   if (!visionDetectedFaces.length || !visionCamera?.videoWidth) return null;
   if (visionDetectedFaces.length === 1) return visionDetectedFaces[0];
@@ -1798,11 +1839,9 @@ function drawVisionSegmentation() {
   context.scale(-1, 1);
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = "high";
-  const destination = getVisionCoverDestination(
+  const destination = getVisionPersonDestination(
     visionLayer.width,
     visionLayer.height,
-    width,
-    height,
   );
   const personEntries = [...visionPersonLayers.values()];
   if (personEntries.length) {
@@ -1880,15 +1919,20 @@ function getVisionPersonBlur(face, faces) {
 function drawVisionCalibrationGuide() {
   const elapsed = performance.now() - visionCalibrationStartedAt;
   const progress = constrain(elapsed / VISION_CALIBRATION_DURATION, 0, 1);
-  const guideWidth = Math.min(width * 0.34, 310);
-  const guideHeight = Math.min(height * 0.6, 420);
+  const guideWidth = Math.min(width * 0.34, 310) * VISION_PERSON_SCALE;
+  const guideHeight = Math.min(height * 0.6, 420) * VISION_PERSON_SCALE;
 
   push();
   noFill();
   stroke(255, 246);
   strokeWeight(2);
   drawingContext.setLineDash([8, 10]);
-  ellipse(width * 0.5, height * 0.49, guideWidth, guideHeight);
+  ellipse(
+    width * VISION_PERSON_CENTER_X,
+    height * VISION_PERSON_CENTER_Y,
+    guideWidth,
+    guideHeight,
+  );
   drawingContext.setLineDash([]);
 
   noStroke();
@@ -1897,7 +1941,7 @@ function drawVisionCalibrationGuide() {
   fill(255);
   textAlign(CENTER, CENTER);
   textSize(14);
-  text("화면 중앙에 서주세요", width * 0.5, height * 0.12 + 18);
+  text("표시 영역의 중앙보다 조금 아래에 서주세요", width * 0.5, height * 0.12 + 18);
   textSize(11);
   text(
     `${Math.max(0, Math.ceil((VISION_CALIBRATION_DURATION - elapsed) / 1000))}초`,
@@ -1920,7 +1964,8 @@ function drawVisionStatus() {
 }
 
 function windowResized() {
-  resizeCanvas(windowWidth, windowHeight);
+  const exhibitionSize = getExhibitionCanvasSize();
+  resizeCanvas(exhibitionSize.width, exhibitionSize.height);
   updateVisionCameraOrientation();
   createWhiteResidues();
   createFineGrain();

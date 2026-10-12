@@ -4,6 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OCTOBER</title>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+    <link rel="preconnect" href="https://storage.googleapis.com" crossorigin />
     <style>
       html,
       body {
@@ -14,15 +16,15 @@
         background: #000;
       }
 
-      #canvas-container,
-      canvas {
-        display: block;
-        width: 100vw;
-        height: 100vh;
+      #canvas-container {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
       }
 
-      #canvas-container {
-        position: relative;
+      canvas {
+        display: block;
       }
 
     </style>
