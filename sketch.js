@@ -27,8 +27,8 @@ const VISION_PERSON_CENTER_Y = 0.57;
 // new target often enough for motion to feel continuous.
 const VISION_SEGMENT_INTERVAL = 140;
 const VISION_MAX_ADAPTIVE_INTERVAL = 420;
-const VISION_CORE_BLUR = 1.5;
-const VISION_OUTER_BLUR = 2;
+const VISION_CORE_BLUR = 2;
+const VISION_OUTER_BLUR = 3;
 const VISION_NEAREST_DISTANCE_BLUR = 1;
 const VISION_MID_DISTANCE_BLUR = 3;
 const VISION_FAR_DISTANCE_BLUR = 6;
@@ -1231,13 +1231,16 @@ function updateVisionClosestFace(now) {
       }
     }
     if (match) matchedTracks.add(match.trackId);
+    const assignedColors = match
+      ? match
+      : getNextVisionPersonColors(
+          STYLES[activeStyle].clothes?.length || VISION_CLOTHES.length,
+        );
     nextTracks.push({
       ...face,
       trackId: match?.trackId ?? visionNextTrackId++,
-      colorIndex: match
-        ? match.colorIndex
-        : visionNextClothesColor++ %
-          (STYLES[activeStyle].clothes?.length || VISION_CLOTHES.length),
+      colorIndex: assignedColors.colorIndex,
+      lowerColorIndex: assignedColors.lowerColorIndex,
     });
   }
 
@@ -1381,6 +1384,7 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
     people = trackVisionPeople(componentsResult.components, foregroundId);
   }
   visionPeopleCount = visionDetectedFaces.length || people.size;
+  prepareVisionClothingZones(maskWidth, maskHeight);
   const output = visionLayerContext.createImageData(maskWidth, maskHeight);
   const splitPersonLayers = visionDetectedFaces.length > 1;
   const personOutputs = new Map();
@@ -1404,10 +1408,10 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
     const person = facePerson || (componentIds ? people.get(componentIds[pixel]) : null);
     const foreground = person?.foreground ?? false;
     const outputIndex = pixel * 4;
-    // A tracked visitor receives one clothing color for the current filter.
-    // Track IDs keep that color stable while separate visitors cycle through
-    // different palette entries.
-    const garmentColorIndex = person?.colorIndex ?? 0;
+    const garmentColorIndex =
+      (category === 4 || category === 5) && person
+        ? getVisionClothingColorIndex(person, pixel, maskWidth)
+        : person?.colorIndex ?? 0;
     let color = visionColorForCategory(category, garmentColorIndex);
 
     const edgePixel = isVisionToonEdge(pixel, labels, maskWidth, maskHeight);
@@ -1579,6 +1583,43 @@ function getVisionFaceMaskPoint(face, maskWidth, maskHeight) {
   };
 }
 
+function getNextVisionPersonColors(paletteLength) {
+  // Give each new visitor a two-color pair. The first three visitors receive
+  // non-overlapping pairs, so their tops and bottoms remain easy to tell
+  // apart while each pair stays fixed for the active filter.
+  const colorIndex = (visionNextClothesColor * 2) % paletteLength;
+  visionNextClothesColor++;
+  return {
+    colorIndex,
+    lowerColorIndex: (colorIndex + 1) % paletteLength,
+  };
+}
+
+function prepareVisionClothingZones(maskWidth, maskHeight) {
+  if (!visionCamera?.videoWidth || !visionCamera?.videoHeight) return;
+  const crop = getVisionCoverCrop(
+    visionCamera.videoWidth,
+    visionCamera.videoHeight,
+    maskWidth,
+    maskHeight,
+  );
+  for (const person of visionDetectedFaces) {
+    const facePoint = getVisionFaceMaskPoint(person, maskWidth, maskHeight);
+    const faceHeight = (person.height / crop.height) * maskHeight;
+    // A gently rounded torso split, placed below the face rather than across
+    // the neck, keeps the upper/lower garment transition visually natural.
+    person.clothingSplitY = facePoint.y + faceHeight * 1.55;
+  }
+}
+
+function getVisionClothingColorIndex(person, pixel, maskWidth) {
+  const y = Math.floor(pixel / maskWidth);
+  if (person.clothingSplitY != null && y > person.clothingSplitY) {
+    return person.lowerColorIndex ?? person.colorIndex;
+  }
+  return person.colorIndex;
+}
+
 function visionColorForCategory(category, colorIndex) {
   if (category === 1) return VISION_HAIR;
   if (category === 2 || category === 3) return VISION_SKIN;
@@ -1725,12 +1766,14 @@ function trackVisionPeople(components, foregroundId) {
     }
     if (match) matchedPrevious.add(match.trackId);
 
+    const assignedColors = match
+      ? match
+      : getNextVisionPersonColors(VISION_CLOTHES.length);
     const person = {
       ...component,
       trackId: match?.trackId ?? visionNextTrackId++,
-      colorIndex: match
-        ? match.colorIndex
-        : visionNextClothesColor++ % VISION_CLOTHES.length,
+      colorIndex: assignedColors.colorIndex,
+      lowerColorIndex: assignedColors.lowerColorIndex,
       foreground: component.id === foregroundId,
     };
     nextTracks.push(person);
