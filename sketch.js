@@ -23,7 +23,7 @@ const EXHIBITION_ASPECT_RATIO = 9 / 16;
 const PORTRAIT_CAMERA_WIDTH = 720;
 const PORTRAIT_CAMERA_HEIGHT = 1280;
 // Visitor framing, expressed relative to the 9:16 artwork stage.
-const VISION_PERSON_SCALE = 0.45;
+const VISION_PERSON_SCALE = 1;
 const VISION_PERSON_CENTER_X = 0.5;
 const VISION_PERSON_CENTER_Y = 0.57;
 // The display runs at 30fps; semantic segmentation only needs to produce a
