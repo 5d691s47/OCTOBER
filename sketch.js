@@ -5,6 +5,7 @@
 // code so the visual language can be tuned one part at a time.
 
 const STYLE_INTERVAL = 20000;
+const STYLE_TRANSITION_DURATION = 1400;
 const WHITE_RESIDUE_COUNT = 900;
 const FINE_GRAIN_COUNT = 1100;
 const MICRO_DOT_COUNT = 1800;
@@ -39,7 +40,7 @@ const VISION_CALIBRATION_DURATION = 3000;
 // Rebuilding the full-resolution print texture is much more expensive than
 // drawing the cached result, so leave the original atmosphere intact while
 // giving the vision pipeline more uninterrupted frames.
-const BACKGROUND_RENDER_INTERVAL = 6000;
+const BACKGROUND_RENDER_INTERVAL = STYLE_INTERVAL;
 const CAMERA_CONNECTION_GRACE_PERIOD = 7000;
 const VISION_PACKAGE =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/+esm";
@@ -114,8 +115,10 @@ let visionCalibratedFaceArea = 0;
 let visionCalibrationReady = false;
 let visionRuntimeError = "";
 let cachedBackground;
+let previousBackground;
 let lastBackgroundRender = -Infinity;
 let backgroundNeedsRefresh = true;
+let backgroundTransitionStartedAt = -Infinity;
 
 const STYLES = [
   {
@@ -348,11 +351,13 @@ function drawGlobalIllustrationTexture() {
 // Updating it at a calm cadence keeps the visible density intact while leaving
 // the browser enough time to open the camera and run segmentation.
 function drawCachedBackground(style) {
-  if (
+  const shouldRenderBackground =
     backgroundNeedsRefresh ||
     !cachedBackground ||
-    millis() - lastBackgroundRender >= BACKGROUND_RENDER_INTERVAL
-  ) {
+    millis() - lastBackgroundRender >= BACKGROUND_RENDER_INTERVAL;
+
+  if (shouldRenderBackground) {
+    const outgoingBackground = cachedBackground;
     drawWhiteBase();
     drawSkyLayer(style);
     drawHorizonLayer(style);
@@ -367,6 +372,29 @@ function drawCachedBackground(style) {
     cachedBackground = get();
     lastBackgroundRender = millis();
     backgroundNeedsRefresh = false;
+
+    if (outgoingBackground) {
+      previousBackground = outgoingBackground;
+      backgroundTransitionStartedAt = millis();
+    }
+  }
+
+  if (!cachedBackground) return;
+
+  if (previousBackground) {
+    const transitionProgress = constrain(
+      (millis() - backgroundTransitionStartedAt) / STYLE_TRANSITION_DURATION,
+      0,
+      1
+    );
+
+    push();
+    image(previousBackground, 0, 0, width, height);
+    tint(255, 255 * transitionProgress);
+    image(cachedBackground, 0, 0, width, height);
+    pop();
+
+    if (transitionProgress >= 1) previousBackground = null;
     return;
   }
 
@@ -1984,7 +2012,9 @@ function windowResized() {
   createSunMarks();
   createFloorMarks();
   cachedBackground = null;
+  previousBackground = null;
   backgroundNeedsRefresh = true;
+  backgroundTransitionStartedAt = -Infinity;
 }
 
 function updateVisionCameraOrientation() {
