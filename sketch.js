@@ -1370,11 +1370,14 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
   // skip the expensive full-mask connected-component flood fill and assign
   // pixels directly to the nearest face. Keep the flood fill only as a
   // fallback for bodies whose faces are not visible.
-  let componentIds;
+  // Always build connected components, even when faces are detected. The
+  // segmentation model can occasionally label a bright object as clothing or
+  // hair; components let us reject any such island that is not near a face.
+  const componentsResult = findVisionPeople(labels, maskWidth, maskHeight);
+  const componentIds = componentsResult.componentIds;
   let people = new Map();
+  let faceComponentOwners = new Map();
   if (!visionDetectedFaces.length) {
-    const componentsResult = findVisionPeople(labels, maskWidth, maskHeight);
-    componentIds = componentsResult.componentIds;
     const foregroundId = findVisionForeground(
       componentIds,
       componentsResult.components,
@@ -1382,6 +1385,12 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
       maskHeight,
     );
     people = trackVisionPeople(componentsResult.components, foregroundId);
+  } else {
+    faceComponentOwners = matchVisionComponentsToFaces(
+      componentsResult.components,
+      maskWidth,
+      maskHeight,
+    );
   }
   visionPeopleCount = visionDetectedFaces.length || people.size;
   prepareVisionClothingZones(maskWidth, maskHeight);
@@ -1401,11 +1410,19 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
     const category = labels[pixel];
     if (category === 0) continue;
 
-    const facePerson =
-      category === 4 || category === 5
+    const componentId = componentIds[pixel];
+    const componentOwner = faceComponentOwners.get(componentId);
+    // When faces are available, render only components that have passed the
+    // face-proximity check. This drops isolated false positives such as wall
+    // details or furniture before they can be mistaken for visitors.
+    if (visionDetectedFaces.length && !componentOwner) continue;
+    const facePerson = componentOwner
+      ? category === 4 || category === 5
         ? findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight)
-        : findVisionFaceForPixel(pixel, maskWidth, maskHeight);
-    const person = facePerson || (componentIds ? people.get(componentIds[pixel]) : null);
+        : findVisionFaceForPixel(pixel, maskWidth, maskHeight)
+      : null;
+    const person = facePerson || componentOwner || people.get(componentId);
+    if (!person) continue;
     const foreground = person?.foreground ?? false;
     const outputIndex = pixel * 4;
     const garmentColorIndex =
@@ -1431,14 +1448,14 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
     output.data[outputIndex + 2] = color[2];
     // Partially transparent boundary pixels let the enlarged mask blend into
     // the background instead of exposing the hard 256px stair-step contour.
-    output.data[outputIndex + 3] = edgePixel ? 218 : 255;
+    output.data[outputIndex + 3] = edgePixel ? 192 : 255;
     if (splitPersonLayers && person?.trackId != null) {
       const personOutput = personOutputs.get(person.trackId)?.imageData;
       if (personOutput) {
         personOutput.data[outputIndex] = color[0];
         personOutput.data[outputIndex + 1] = color[1];
         personOutput.data[outputIndex + 2] = color[2];
-        personOutput.data[outputIndex + 3] = edgePixel ? 218 : 255;
+        personOutput.data[outputIndex + 3] = edgePixel ? 192 : 255;
       }
     }
   }
@@ -1717,16 +1734,13 @@ function findVisionForeground(componentIds, components, maskWidth, maskHeight) {
       visionClosestFace.area >= visionCalibratedFaceArea * 0.18);
 
   if (usableFace && visionCamera?.videoWidth && visionCamera?.videoHeight) {
-    const x = constrain(
-      Math.floor((usableFace.x / visionCamera.videoWidth) * maskWidth),
-      0,
-      maskWidth - 1,
+    const facePoint = getVisionFaceMaskPoint(
+      usableFace,
+      maskWidth,
+      maskHeight,
     );
-    const y = constrain(
-      Math.floor((usableFace.y / visionCamera.videoHeight) * maskHeight),
-      0,
-      maskHeight - 1,
-    );
+    const x = constrain(Math.floor(facePoint.x), 0, maskWidth - 1);
+    const y = constrain(Math.floor(facePoint.y), 0, maskHeight - 1);
     const directHit = componentIds[y * maskWidth + x];
     if (directHit >= 0) return directHit;
 
@@ -1782,6 +1796,42 @@ function trackVisionPeople(components, foregroundId) {
 
   visionPersonTracks = nextTracks;
   return people;
+}
+
+function matchVisionComponentsToFaces(components, maskWidth, maskHeight) {
+  const owners = new Map();
+  for (const component of components) {
+    if (component.count <= 80) continue;
+    let nearestFace = null;
+    let nearestScore = Infinity;
+    for (const face of visionDetectedFaces) {
+      const facePoint = getVisionFaceMaskPoint(face, maskWidth, maskHeight);
+      const faceWidth = (face.width / visionCamera.videoWidth) * maskWidth;
+      const faceHeight = (face.height / visionCamera.videoHeight) * maskHeight;
+      // A valid body/hair component must sit within a portrait-sized region
+      // around the detected face. This is deliberately generous for raised
+      // arms while excluding independent background objects.
+      const maxHorizontal = Math.max(faceWidth * 3.2, 28);
+      const minY = facePoint.y - Math.max(faceHeight * 2.2, 22);
+      const maxY = facePoint.y + Math.max(faceHeight * 7.5, 72);
+      if (
+        component.x < facePoint.x - maxHorizontal ||
+        component.x > facePoint.x + maxHorizontal ||
+        component.y < minY ||
+        component.y > maxY
+      )
+        continue;
+      const score =
+        Math.abs(component.x - facePoint.x) * 1.5 +
+        Math.abs(component.y - facePoint.y) * 0.35;
+      if (score < nearestScore) {
+        nearestFace = face;
+        nearestScore = score;
+      }
+    }
+    if (nearestFace) owners.set(component.id, nearestFace);
+  }
+  return owners;
 }
 
 function drawVisionSegmentation() {
