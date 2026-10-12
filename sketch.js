@@ -20,6 +20,8 @@ const FLOATING_DOT_COUNT = 360;
 // The exhibition is authored for a vertical 9:16 display. On a screen with a
 // different ratio, the artwork is letterboxed rather than stretched.
 const EXHIBITION_ASPECT_RATIO = 9 / 16;
+const PORTRAIT_CAMERA_WIDTH = 720;
+const PORTRAIT_CAMERA_HEIGHT = 1280;
 // Visitor framing, expressed relative to the 9:16 artwork stage.
 const VISION_PERSON_SCALE = 0.45;
 const VISION_PERSON_CENTER_X = 0.5;
@@ -1067,9 +1069,9 @@ async function startVisionCamera() {
   try {
     let stream;
     try {
-      // Match the capture preference to the physical display orientation.
-      // Portrait installations request 9:16; landscape installations request
-      // 16:9. These are ideal constraints, so unsupported cameras still work.
+      // The artwork is fixed at 9:16, so request a portrait input even when
+      // the browser itself is displayed on a landscape monitor. These are
+      // ideal constraints, so unsupported cameras still work.
       stream = await navigator.mediaDevices.getUserMedia(
         getDisplayCameraConstraints(),
       );
@@ -1126,12 +1128,16 @@ async function startVisionCamera() {
 }
 
 function getDisplayCameraConstraints() {
-  const portraitDisplay = window.innerHeight > window.innerWidth;
   return {
     video: {
-      width: { ideal: portraitDisplay ? 720 : 1280 },
-      height: { ideal: portraitDisplay ? 1280 : 720 },
-      aspectRatio: { ideal: portraitDisplay ? 9 / 16 : 16 / 9 },
+      // The exhibition canvas is always portrait even when its host monitor
+      // is landscape. Request a 9:16 camera frame independently from the
+      // browser-window orientation, so a portrait camera is not reverted to
+      // 16:9 during setup or a window resize.
+      width: { ideal: PORTRAIT_CAMERA_WIDTH },
+      height: { ideal: PORTRAIT_CAMERA_HEIGHT },
+      aspectRatio: { ideal: EXHIBITION_ASPECT_RATIO },
+      resizeMode: "crop-and-scale",
       facingMode: { ideal: "user" },
     },
     audio: false,
@@ -2046,9 +2052,9 @@ function updateVisionCameraOrientation() {
   const track = visionCamera?.srcObject?.getVideoTracks?.()[0];
   if (!track?.applyConstraints) return;
 
-  // The canvas and crop mapping already use the live window dimensions. This
-  // optional track update asks the camera for a matching orientation too,
-  // while keeping the existing stream if a driver rejects the request.
+  // Keep the live stream in the exhibition's fixed portrait format after a
+  // browser resize, while preserving the existing stream if a driver rejects
+  // the optional update.
   track
     .applyConstraints(getDisplayCameraConstraints().video)
     .catch((error) =>
