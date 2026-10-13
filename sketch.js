@@ -28,7 +28,7 @@ const VISION_PERSON_CENTER_X = 0.5;
 const VISION_PERSON_CENTER_Y = 0.57;
 // The display runs at 30fps; semantic segmentation only needs to produce a
 // new target often enough for motion to feel continuous.
-const VISION_SEGMENT_INTERVAL = 140;
+const VISION_SEGMENT_INTERVAL = 120;
 const VISION_MAX_ADAPTIVE_INTERVAL = 420;
 const VISION_CORE_BLUR = 2;
 const VISION_OUTER_BLUR = 3;
@@ -36,7 +36,7 @@ const VISION_NEAREST_DISTANCE_BLUR = 1;
 const VISION_MID_DISTANCE_BLUR = 3;
 const VISION_FAR_DISTANCE_BLUR = 6;
 const VISION_PENCIL_OPACITY = 0.16;
-const VISION_FACE_INTERVAL = 500;
+const VISION_FACE_INTERVAL = 360;
 const VISION_CALIBRATION_FACE_INTERVAL = 220;
 const VISION_CALIBRATION_DURATION = 3000;
 // Keep an identity alive briefly when a face detector skips a frame. Without
@@ -1464,6 +1464,12 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
   }
   visionPeopleCount = visionDetectedFaces.length || people.size;
   const hasFaceAnchoredComponents = faceComponentOwners.size > 0;
+  // When several faces are visible, assign every clothing pixel to its
+  // nearest face even if their bodies merged into one segmentation component.
+  // This keeps a distinct palette per visitor rather than giving the merged
+  // silhouette one shared colour.
+  const useFacePixelAssignment =
+    visionDetectedFaces.length > 1 || hasFaceAnchoredComponents;
 
   // Use the camera's original colours only to decide whether this visitor's
   // top and bottom are actually different. Similar garments remain a single
@@ -1479,7 +1485,7 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
       if (category !== 4 && category !== 5) continue;
       const componentOwner = faceComponentOwners.get(componentIds[pixel]);
       if (hasFaceAnchoredComponents && !componentOwner) continue;
-      const person = componentOwner
+      const person = useFacePixelAssignment
         ? findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight)
         : people.get(componentIds[pixel]);
       if (!person) continue;
@@ -1496,16 +1502,10 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
     for (const person of visionDetectedFaces) updateVisionGarmentColors(person);
   }
   const output = visionLayerContext.createImageData(maskWidth, maskHeight);
-  const splitPersonLayers = visionDetectedFaces.length > 1;
-  const personOutputs = new Map();
-  if (splitPersonLayers) {
-    for (const person of visionDetectedFaces) {
-      personOutputs.set(person.trackId, {
-        person,
-        imageData: visionLayerContext.createImageData(maskWidth, maskHeight),
-      });
-    }
-  }
+  // One coloured mask is substantially cheaper than allocating a complete
+  // canvas per visitor every update. Colour separation happens per pixel, so
+  // this does not merge visitors visually.
+  visionPersonLayers.clear();
 
   for (let pixel = 0; pixel < labels.length; pixel++) {
     const category = labels[pixel];
@@ -1517,7 +1517,7 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
     // face-proximity check. This drops isolated false positives such as wall
     // details or furniture before they can be mistaken for visitors.
     if (hasFaceAnchoredComponents && !componentOwner) continue;
-    const facePerson = componentOwner
+    const facePerson = useFacePixelAssignment
       ? category === 4 || category === 5
         ? findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight)
         : findVisionFaceForPixel(pixel, maskWidth, maskHeight)
@@ -1550,15 +1550,6 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
     // Partially transparent boundary pixels let the enlarged mask blend into
     // the background instead of exposing the hard 256px stair-step contour.
     output.data[outputIndex + 3] = edgePixel ? 192 : 255;
-    if (splitPersonLayers && person?.trackId != null) {
-      const personOutput = personOutputs.get(person.trackId)?.imageData;
-      if (personOutput) {
-        personOutput.data[outputIndex] = color[0];
-        personOutput.data[outputIndex + 1] = color[1];
-        personOutput.data[outputIndex + 2] = color[2];
-        personOutput.data[outputIndex + 3] = edgePixel ? 192 : 255;
-      }
-    }
   }
 
   // Replace the displayed mask as one complete frame. Keeping only the
@@ -1571,22 +1562,6 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
   visionLayerContext.drawImage(visionPencilLayer, 0, 0);
   visionLayerContext.restore();
 
-  // Keep a separate transparent layer for each detected person so distance
-  // based blur can be applied independently during compositing.
-  const activeTrackIds = new Set(personOutputs.keys());
-  for (const trackId of visionPersonLayers.keys()) {
-    if (!activeTrackIds.has(trackId)) visionPersonLayers.delete(trackId);
-  }
-  for (const [trackId, entry] of personOutputs) {
-    let layer = visionPersonLayers.get(trackId)?.canvas;
-    if (!layer || layer.width !== maskWidth || layer.height !== maskHeight) {
-      layer = document.createElement("canvas");
-      layer.width = maskWidth;
-      layer.height = maskHeight;
-    }
-    layer.getContext("2d").putImageData(entry.imageData, 0, 0);
-    visionPersonLayers.set(trackId, { canvas: layer, face: entry.person });
-  }
 }
 
 function getVisionCoverCrop(sourceWidth, sourceHeight, targetWidth, targetHeight) {
