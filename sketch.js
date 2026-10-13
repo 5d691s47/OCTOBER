@@ -1526,11 +1526,10 @@ function renderVisionMask(labels, maskWidth, maskHeight) {
     if (!person) continue;
     const foreground = person?.foreground ?? false;
     const outputIndex = pixel * 4;
-    const garmentColorIndex =
-      (category === 4 || category === 5) && person
-        ? getVisionGarmentColorIndex(person, pixel, maskWidth, maskHeight)
-        : person?.colorIndex ?? 0;
-    let color = visionColorForCategory(category, garmentColorIndex);
+    const isGarment = category === 4 || category === 5;
+    let color = isGarment
+      ? getVisionGarmentColor(person, pixel, maskWidth, maskHeight)
+      : visionColorForCategory(category, person?.colorIndex ?? 0);
 
     const edgePixel = isVisionToonEdge(pixel, labels, maskWidth, maskHeight);
     if (!foreground) {
@@ -1688,7 +1687,19 @@ function getNextVisionPersonColors(paletteLength) {
 }
 
 function getVisionClothingSection(person, pixel, maskWidth, maskHeight) {
-  if (!visionCamera?.videoWidth || !visionCamera?.videoHeight) return "upper";
+  const { y, boundaryY } = getVisionClothingBoundary(
+    person,
+    pixel,
+    maskWidth,
+    maskHeight,
+  );
+  return y > boundaryY ? "lower" : "upper";
+}
+
+function getVisionClothingBoundary(person, pixel, maskWidth, maskHeight) {
+  if (!visionCamera?.videoWidth || !visionCamera?.videoHeight) {
+    return { y: 0, boundaryY: Infinity, blendHeight: 1 };
+  }
   const crop = getVisionCoverCrop(
     visionCamera.videoWidth,
     visionCamera.videoHeight,
@@ -1698,7 +1709,11 @@ function getVisionClothingSection(person, pixel, maskWidth, maskHeight) {
   const facePoint = getVisionFaceMaskPoint(person, maskWidth, maskHeight);
   const faceHeight = (person.height / crop.height) * maskHeight;
   const y = Math.floor(pixel / maskWidth);
-  return y > facePoint.y + faceHeight * 1.55 ? "lower" : "upper";
+  return {
+    y,
+    boundaryY: facePoint.y + faceHeight * 1.55,
+    blendHeight: Math.max(faceHeight * 0.72, 8),
+  };
 }
 
 function updateVisionGarmentColors(person) {
@@ -1722,10 +1737,30 @@ function updateVisionGarmentColors(person) {
   if (track) track.lowerColorIndex = person.lowerColorIndex;
 }
 
-function getVisionGarmentColorIndex(person, pixel, maskWidth, maskHeight) {
-  return getVisionClothingSection(person, pixel, maskWidth, maskHeight) === "lower"
-    ? person.lowerColorIndex ?? person.colorIndex
-    : person.colorIndex;
+function getVisionGarmentColor(person, pixel, maskWidth, maskHeight) {
+  const upperColor = visionColorForCategory(4, person.colorIndex);
+  const lowerColor = visionColorForCategory(
+    4,
+    person.lowerColorIndex ?? person.colorIndex,
+  );
+  if (person.lowerColorIndex == null || person.lowerColorIndex === person.colorIndex) {
+    return upperColor;
+  }
+
+  const { y, boundaryY, blendHeight } = getVisionClothingBoundary(
+    person,
+    pixel,
+    maskWidth,
+    maskHeight,
+  );
+  const blend = constrain(
+    (y - (boundaryY - blendHeight * 0.5)) / blendHeight,
+    0,
+    1,
+  );
+  return upperColor.map((channel, index) =>
+    Math.round(lerp(channel, lowerColor[index], blend)),
+  );
 }
 
 function visionColorForCategory(category, colorIndex) {
