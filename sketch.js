@@ -22,10 +22,10 @@ const FLOATING_DOT_COUNT = 360;
 const EXHIBITION_ASPECT_RATIO = 9 / 16;
 const PORTRAIT_CAMERA_WIDTH = 720;
 const PORTRAIT_CAMERA_HEIGHT = 1280;
-// The installed FHD camera is mounted sideways. Rotate the input clockwise
-// before both vision analysis and compositing so the whole pipeline remains
-// aligned with the vertical exhibition display.
-const VISION_CAMERA_ROTATION_DEGREES = 90;
+// The installed FHD camera is mounted sideways. Rotate the input
+// counter-clockwise before both vision analysis and compositing so the whole
+// pipeline remains aligned with the vertical exhibition display.
+const VISION_CAMERA_ROTATION_DEGREES = -90;
 // Visitor framing, expressed relative to the 9:16 artwork stage.
 const VISION_PERSON_SCALE = 1;
 const VISION_PERSON_CENTER_X = 0.5;
