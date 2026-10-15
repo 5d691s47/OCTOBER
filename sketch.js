@@ -1460,19 +1460,12 @@ function getVisionFrameDimensions() {
 }
 
 function renderVisionMask(labels, maskWidth, maskHeight, cameraFrame) {
-  const cameraCrop = getVisionCoverCrop(
-    cameraFrame.width,
-    cameraFrame.height,
-    maskWidth,
-    maskHeight,
-  );
+  // The model mask is square, but the rotated camera is 9:16. Map the full
+  // camera frame into mask coordinates rather than centre-cropping it. The
+  // same aspect is restored when the mask is drawn to the exhibition canvas.
   visionCameraContext.clearRect(0, 0, maskWidth, maskHeight);
   visionCameraContext.drawImage(
     cameraFrame,
-    cameraCrop.x,
-    cameraCrop.y,
-    cameraCrop.width,
-    cameraCrop.height,
     0,
     0,
     maskWidth,
@@ -1721,15 +1714,9 @@ function findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight) {
 
 function getVisionFaceMaskPoint(face, maskWidth, maskHeight) {
   const frame = getVisionFrameDimensions();
-  const crop = getVisionCoverCrop(
-    frame.width,
-    frame.height,
-    maskWidth,
-    maskHeight,
-  );
   return {
-    x: ((face.x - crop.x) / crop.width) * maskWidth,
-    y: ((face.y - crop.y) / crop.height) * maskHeight,
+    x: (face.x / frame.width) * maskWidth,
+    y: (face.y / frame.height) * maskHeight,
   };
 }
 
@@ -1759,14 +1746,8 @@ function getVisionClothingBoundary(person, pixel, maskWidth, maskHeight) {
   if (!frame.width || !frame.height) {
     return { y: 0, boundaryY: Infinity, blendHeight: 1 };
   }
-  const crop = getVisionCoverCrop(
-    frame.width,
-    frame.height,
-    maskWidth,
-    maskHeight,
-  );
   const facePoint = getVisionFaceMaskPoint(person, maskWidth, maskHeight);
-  const faceHeight = (person.height / crop.height) * maskHeight;
+  const faceHeight = (person.height / frame.height) * maskHeight;
   const y = Math.floor(pixel / maskWidth);
   return {
     y,
@@ -2032,9 +2013,10 @@ function drawVisionSegmentation() {
   context.scale(-1, 1);
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = "high";
+  const cameraFrame = getVisionFrameDimensions();
   const destination = getVisionPersonDestination(
-    visionLayer.width,
-    visionLayer.height,
+    cameraFrame.width,
+    cameraFrame.height,
   );
   const personEntries = [...visionPersonLayers.values()];
   if (personEntries.length) {
