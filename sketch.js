@@ -20,8 +20,11 @@ const FLOATING_DOT_COUNT = 360;
 // The exhibition is authored for a vertical 9:16 display. On a screen with a
 // different ratio, the artwork is letterboxed rather than stretched.
 const EXHIBITION_ASPECT_RATIO = 9 / 16;
-const PORTRAIT_CAMERA_WIDTH = 720;
-const PORTRAIT_CAMERA_HEIGHT = 1280;
+// Keep the sideways-mounted camera in its native landscape format. It is
+// rotated into the portrait exhibition format after the full frame arrives.
+const RAW_CAMERA_WIDTH = 1280;
+const RAW_CAMERA_HEIGHT = 720;
+const RAW_CAMERA_ASPECT_RATIO = 16 / 9;
 // The installed FHD camera is mounted sideways. Rotate the input
 // counter-clockwise before both vision analysis and compositing so the whole
 // pipeline remains aligned with the vertical exhibition display.
@@ -1076,9 +1079,9 @@ async function startVisionCamera() {
   try {
     let stream;
     try {
-      // The artwork is fixed at 9:16, so request a portrait input even when
-      // the browser itself is displayed on a landscape monitor. These are
-      // ideal constraints, so unsupported cameras still work.
+      // Keep the camera's full landscape input; it is rotated to 9:16 inside
+      // the page after capture. These are ideal constraints, so unsupported
+      // cameras still work.
       stream = await navigator.mediaDevices.getUserMedia(
         getDisplayCameraConstraints(),
       );
@@ -1137,14 +1140,13 @@ async function startVisionCamera() {
 function getDisplayCameraConstraints() {
   return {
     video: {
-      // The exhibition canvas is always portrait even when its host monitor
-      // is landscape. Request a 9:16 camera frame independently from the
-      // browser-window orientation, so a portrait camera is not reverted to
-      // 16:9 during setup or a window resize.
-      width: { ideal: PORTRAIT_CAMERA_WIDTH },
-      height: { ideal: PORTRAIT_CAMERA_HEIGHT },
-      aspectRatio: { ideal: EXHIBITION_ASPECT_RATIO },
-      resizeMode: "crop-and-scale",
+      // Do not ask the driver to crop this landscape camera into 9:16. That
+      // removes the top and bottom after its physical 90° installation is
+      // corrected in getVisionProcessingFrame().
+      width: { ideal: RAW_CAMERA_WIDTH },
+      height: { ideal: RAW_CAMERA_HEIGHT },
+      aspectRatio: { ideal: RAW_CAMERA_ASPECT_RATIO },
+      resizeMode: "none",
       facingMode: { ideal: "user" },
     },
     audio: false,
