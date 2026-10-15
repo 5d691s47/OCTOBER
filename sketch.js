@@ -1659,14 +1659,11 @@ function getVisionCoverDestination(sourceWidth, sourceHeight, targetWidth, targe
 }
 
 function getVisionPersonDestination(sourceWidth, sourceHeight) {
-  const cover = getVisionCoverDestination(
-    sourceWidth,
-    sourceHeight,
-    width,
-    height,
-  );
-  const scaledWidth = cover.width * VISION_PERSON_SCALE;
-  const scaledHeight = cover.height * VISION_PERSON_SCALE;
+  // Match the live camera composition to the exhibition display's width.
+  // The previous cover calculation prioritised height and cropped the left
+  // and right edges of the camera frame on a 9:16 display.
+  const scaledWidth = width * VISION_PERSON_SCALE;
+  const scaledHeight = (sourceHeight / sourceWidth) * scaledWidth;
   return {
     x: width * VISION_PERSON_CENTER_X - scaledWidth * 0.5,
     y: height * VISION_PERSON_CENTER_Y - scaledHeight * 0.5,
