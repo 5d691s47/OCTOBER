@@ -25,6 +25,7 @@ const EXHIBITION_ASPECT_RATIO = 9 / 16;
 const RAW_CAMERA_WIDTH = 1280;
 const RAW_CAMERA_HEIGHT = 720;
 const RAW_CAMERA_ASPECT_RATIO = 16 / 9;
+const VISION_MODEL_INPUT_SIZE = 512;
 // The installed FHD camera is mounted sideways. Rotate the input
 // counter-clockwise before both vision analysis and compositing so the whole
 // pipeline remains aligned with the vertical exhibition display.
@@ -111,6 +112,8 @@ let visionCameraFrame;
 let visionCameraContext;
 let visionProcessingFrame;
 let visionProcessingContext;
+let visionModelFrame;
+let visionModelContext;
 let visionLastSegmentationAt = 0;
 let visionAdaptiveSegmentInterval = VISION_SEGMENT_INTERVAL;
 let visionGarmentSampleTick = 0;
@@ -1208,9 +1211,10 @@ function updateVisionSegmentation() {
   const processingStartedAt = performance.now();
   try {
     const cameraFrame = getVisionProcessingFrame();
-    if (!cameraFrame) return;
+    const modelFrame = getVisionModelFrame(cameraFrame);
+    if (!modelFrame) return;
 
-    const result = visionSegmenter.segmentForVideo(cameraFrame, now);
+    const result = visionSegmenter.segmentForVideo(modelFrame, now);
     const mask = result.categoryMask;
     if (!mask) return;
 
@@ -1218,7 +1222,7 @@ function updateVisionSegmentation() {
     if (now - visionLastFaceAt >= faceInterval && visionFaceDetector) {
       visionLastFaceAt = now;
       try {
-        updateVisionClosestFace(now, cameraFrame);
+        updateVisionClosestFace(now, modelFrame);
       } catch (faceError) {
         // Face tracking only chooses the foreground person. It must never
         // prevent the core hair/skin/clothing segmentation from appearing.
@@ -1232,7 +1236,7 @@ function updateVisionSegmentation() {
       mask.getAsUint8Array(),
       mask.width,
       mask.height,
-      cameraFrame,
+      modelFrame,
     );
     visionRuntimeError = "";
     if (!visionCalibrating) {
@@ -1454,20 +1458,58 @@ function getVisionProcessingFrame() {
   return visionProcessingFrame;
 }
 
-function getVisionFrameDimensions() {
+function getVisionModelFrame(cameraFrame) {
+  if (!cameraFrame?.width || !cameraFrame?.height) return null;
+  if (!visionModelFrame) {
+    visionModelFrame = document.createElement("canvas");
+    visionModelContext = visionModelFrame.getContext("2d");
+  }
+  if (
+    visionModelFrame.width !== VISION_MODEL_INPUT_SIZE ||
+    visionModelFrame.height !== VISION_MODEL_INPUT_SIZE
+  ) {
+    visionModelFrame.width = VISION_MODEL_INPUT_SIZE;
+    visionModelFrame.height = VISION_MODEL_INPUT_SIZE;
+  }
+
+  // MediaPipe's model surface is square. Stretching the entire portrait frame
+  // into that surface avoids the implicit centre crop; it is proportionally
+  // restored when the resulting mask is drawn on the portrait display.
+  visionModelContext.clearRect(0, 0, VISION_MODEL_INPUT_SIZE, VISION_MODEL_INPUT_SIZE);
+  visionModelContext.drawImage(
+    cameraFrame,
+    0,
+    0,
+    cameraFrame.width,
+    cameraFrame.height,
+    0,
+    0,
+    VISION_MODEL_INPUT_SIZE,
+    VISION_MODEL_INPUT_SIZE,
+  );
+  return visionModelFrame;
+}
+
+function getVisionCameraFrameDimensions() {
   return {
     width: visionProcessingFrame?.width || visionCamera?.videoWidth || 0,
     height: visionProcessingFrame?.height || visionCamera?.videoHeight || 0,
   };
 }
 
-function renderVisionMask(labels, maskWidth, maskHeight, cameraFrame) {
-  // The model mask is square, but the rotated camera is 9:16. Map the full
-  // camera frame into mask coordinates rather than centre-cropping it. The
-  // same aspect is restored when the mask is drawn to the exhibition canvas.
+function getVisionFrameDimensions() {
+  return {
+    width: visionModelFrame?.width || visionCamera?.videoWidth || 0,
+    height: visionModelFrame?.height || visionCamera?.videoHeight || 0,
+  };
+}
+
+function renderVisionMask(labels, maskWidth, maskHeight, modelFrame) {
+  // The analysis image contains the complete camera frame, scaled into the
+  // model's square coordinates without removing its top or bottom.
   visionCameraContext.clearRect(0, 0, maskWidth, maskHeight);
   visionCameraContext.drawImage(
-    cameraFrame,
+    modelFrame,
     0,
     0,
     maskWidth,
@@ -2015,7 +2057,7 @@ function drawVisionSegmentation() {
   context.scale(-1, 1);
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = "high";
-  const cameraFrame = getVisionFrameDimensions();
+  const cameraFrame = getVisionCameraFrameDimensions();
   const destination = getVisionPersonDestination(
     cameraFrame.width,
     cameraFrame.height,
