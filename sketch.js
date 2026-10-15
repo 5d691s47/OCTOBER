@@ -22,6 +22,10 @@ const FLOATING_DOT_COUNT = 360;
 const EXHIBITION_ASPECT_RATIO = 9 / 16;
 const PORTRAIT_CAMERA_WIDTH = 720;
 const PORTRAIT_CAMERA_HEIGHT = 1280;
+// The installed FHD camera is mounted sideways. Rotate the input clockwise
+// before both vision analysis and compositing so the whole pipeline remains
+// aligned with the vertical exhibition display.
+const VISION_CAMERA_ROTATION_DEGREES = 90;
 // Visitor framing, expressed relative to the 9:16 artwork stage.
 const VISION_PERSON_SCALE = 1;
 const VISION_PERSON_CENTER_X = 0.5;
@@ -102,6 +106,8 @@ let visionPersonLayers = new Map();
 let visionTargetImageData;
 let visionCameraFrame;
 let visionCameraContext;
+let visionProcessingFrame;
+let visionProcessingContext;
 let visionLastSegmentationAt = 0;
 let visionAdaptiveSegmentInterval = VISION_SEGMENT_INTERVAL;
 let visionGarmentSampleTick = 0;
@@ -1199,7 +1205,10 @@ function updateVisionSegmentation() {
 
   const processingStartedAt = performance.now();
   try {
-    const result = visionSegmenter.segmentForVideo(visionCamera, now);
+    const cameraFrame = getVisionProcessingFrame();
+    if (!cameraFrame) return;
+
+    const result = visionSegmenter.segmentForVideo(cameraFrame, now);
     const mask = result.categoryMask;
     if (!mask) return;
 
@@ -1207,7 +1216,7 @@ function updateVisionSegmentation() {
     if (now - visionLastFaceAt >= faceInterval && visionFaceDetector) {
       visionLastFaceAt = now;
       try {
-        updateVisionClosestFace(now);
+        updateVisionClosestFace(now, cameraFrame);
       } catch (faceError) {
         // Face tracking only chooses the foreground person. It must never
         // prevent the core hair/skin/clothing segmentation from appearing.
@@ -1217,7 +1226,12 @@ function updateVisionSegmentation() {
       }
     }
 
-    renderVisionMask(mask.getAsUint8Array(), mask.width, mask.height);
+    renderVisionMask(
+      mask.getAsUint8Array(),
+      mask.width,
+      mask.height,
+      cameraFrame,
+    );
     visionRuntimeError = "";
     if (!visionCalibrating) {
       visionStatus = visionPeopleCount
@@ -1240,8 +1254,8 @@ function updateVisionSegmentation() {
   }
 }
 
-function updateVisionClosestFace(now) {
-  const result = visionFaceDetector.detectForVideo(visionCamera, now);
+function updateVisionClosestFace(now, cameraFrame) {
+  const result = visionFaceDetector.detectForVideo(cameraFrame, now);
   const faces = result?.detections || [];
   const detected = faces
     .map((face) => {
@@ -1399,16 +1413,62 @@ function ensureVisionSurfaces(maskWidth, maskHeight) {
   visionTargetImageData = null;
 }
 
-function renderVisionMask(labels, maskWidth, maskHeight) {
+function getVisionProcessingFrame() {
+  const sourceWidth = visionCamera?.videoWidth || 0;
+  const sourceHeight = visionCamera?.videoHeight || 0;
+  if (!sourceWidth || !sourceHeight) return null;
+
+  const quarterTurn = Math.abs(VISION_CAMERA_ROTATION_DEGREES) === 90;
+  const frameWidth = quarterTurn ? sourceHeight : sourceWidth;
+  const frameHeight = quarterTurn ? sourceWidth : sourceHeight;
+
+  if (!visionProcessingFrame) {
+    visionProcessingFrame = document.createElement("canvas");
+    visionProcessingContext = visionProcessingFrame.getContext("2d");
+  }
+  if (
+    visionProcessingFrame.width !== frameWidth ||
+    visionProcessingFrame.height !== frameHeight
+  ) {
+    visionProcessingFrame.width = frameWidth;
+    visionProcessingFrame.height = frameHeight;
+  }
+
+  visionProcessingContext.setTransform(1, 0, 0, 1, 0, 0);
+  visionProcessingContext.clearRect(0, 0, frameWidth, frameHeight);
+  visionProcessingContext.save();
+  if (VISION_CAMERA_ROTATION_DEGREES === -90) {
+    visionProcessingContext.translate(0, frameHeight);
+    visionProcessingContext.rotate(-Math.PI / 2);
+  } else if (VISION_CAMERA_ROTATION_DEGREES === 90) {
+    visionProcessingContext.translate(frameWidth, 0);
+    visionProcessingContext.rotate(Math.PI / 2);
+  } else if (Math.abs(VISION_CAMERA_ROTATION_DEGREES) === 180) {
+    visionProcessingContext.translate(frameWidth, frameHeight);
+    visionProcessingContext.rotate(Math.PI);
+  }
+  visionProcessingContext.drawImage(visionCamera, 0, 0);
+  visionProcessingContext.restore();
+  return visionProcessingFrame;
+}
+
+function getVisionFrameDimensions() {
+  return {
+    width: visionProcessingFrame?.width || visionCamera?.videoWidth || 0,
+    height: visionProcessingFrame?.height || visionCamera?.videoHeight || 0,
+  };
+}
+
+function renderVisionMask(labels, maskWidth, maskHeight, cameraFrame) {
   const cameraCrop = getVisionCoverCrop(
-    visionCamera.videoWidth,
-    visionCamera.videoHeight,
+    cameraFrame.width,
+    cameraFrame.height,
     maskWidth,
     maskHeight,
   );
   visionCameraContext.clearRect(0, 0, maskWidth, maskHeight);
   visionCameraContext.drawImage(
-    visionCamera,
+    cameraFrame,
     cameraCrop.x,
     cameraCrop.y,
     cameraCrop.width,
@@ -1663,9 +1723,10 @@ function findVisionClothingFaceForPixel(pixel, maskWidth, maskHeight) {
 }
 
 function getVisionFaceMaskPoint(face, maskWidth, maskHeight) {
+  const frame = getVisionFrameDimensions();
   const crop = getVisionCoverCrop(
-    visionCamera.videoWidth,
-    visionCamera.videoHeight,
+    frame.width,
+    frame.height,
     maskWidth,
     maskHeight,
   );
@@ -1697,12 +1758,13 @@ function getVisionClothingSection(person, pixel, maskWidth, maskHeight) {
 }
 
 function getVisionClothingBoundary(person, pixel, maskWidth, maskHeight) {
-  if (!visionCamera?.videoWidth || !visionCamera?.videoHeight) {
+  const frame = getVisionFrameDimensions();
+  if (!frame.width || !frame.height) {
     return { y: 0, boundaryY: Infinity, blendHeight: 1 };
   }
   const crop = getVisionCoverCrop(
-    visionCamera.videoWidth,
-    visionCamera.videoHeight,
+    frame.width,
+    frame.height,
     maskWidth,
     maskHeight,
   );
@@ -1859,7 +1921,8 @@ function findVisionForeground(componentIds, components, maskWidth, maskHeight) {
     (!visionCalibrationReady ||
       visionClosestFace.area >= visionCalibratedFaceArea * 0.18);
 
-  if (usableFace && visionCamera?.videoWidth && visionCamera?.videoHeight) {
+  const frame = getVisionFrameDimensions();
+  if (usableFace && frame.width && frame.height) {
     const facePoint = getVisionFaceMaskPoint(
       usableFace,
       maskWidth,
@@ -1926,14 +1989,15 @@ function trackVisionPeople(components, foregroundId) {
 
 function matchVisionComponentsToFaces(components, maskWidth, maskHeight) {
   const owners = new Map();
+  const frame = getVisionFrameDimensions();
   for (const component of components) {
     if (component.count <= 80) continue;
     let nearestFace = null;
     let nearestScore = Infinity;
     for (const face of visionDetectedFaces) {
       const facePoint = getVisionFaceMaskPoint(face, maskWidth, maskHeight);
-      const faceWidth = (face.width / visionCamera.videoWidth) * maskWidth;
-      const faceHeight = (face.height / visionCamera.videoHeight) * maskHeight;
+      const faceWidth = (face.width / frame.width) * maskWidth;
+      const faceHeight = (face.height / frame.height) * maskHeight;
       // A valid body/hair component must sit within a portrait-sized region
       // around the detected face. This is deliberately generous for raised
       // arms while excluding independent background objects.
